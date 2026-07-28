@@ -1,6 +1,7 @@
 """Canonical wire shapes. The OpenAI chat format is both the client contract and the
 internal representation; providers translate to and from these models."""
 
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -65,6 +66,52 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[Choice]
     usage: Usage
+
+
+class ChunkDelta(BaseModel):
+    role: str | None = None
+    content: str | None = None
+
+
+class ChunkChoice(BaseModel):
+    index: int = 0
+    delta: ChunkDelta
+    finish_reason: str | None = None
+
+
+class ChatCompletionChunk(BaseModel):
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: list[ChunkChoice] = Field(default_factory=list)
+    usage: Usage | None = None
+
+
+def chunk_json(chunk: ChatCompletionChunk) -> str:
+    """Serialize a chunk the way OpenAI frames it.
+
+    Absent delta fields are omitted while `finish_reason` stays present as null, and `usage`
+    appears only on the final usage chunk. SDK stream parsers depend on exactly this shape,
+    so the payload is built field by field instead of by a blanket model_dump.
+    """
+    payload: dict[str, Any] = {
+        "id": chunk.id,
+        "object": chunk.object,
+        "created": chunk.created,
+        "model": chunk.model,
+        "choices": [
+            {
+                "index": choice.index,
+                "delta": choice.delta.model_dump(exclude_none=True),
+                "finish_reason": choice.finish_reason,
+            }
+            for choice in chunk.choices
+        ],
+    }
+    if chunk.usage is not None:
+        payload["usage"] = chunk.usage.model_dump()
+    return json.dumps(payload, separators=(",", ":"))
 
 
 def validate_supported(body: ChatCompletionRequest) -> None:

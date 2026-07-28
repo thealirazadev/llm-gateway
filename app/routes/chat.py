@@ -1,4 +1,4 @@
-"""Non-streaming chat completions: authenticate, route, call upstream, cost, audit."""
+"""Chat completions: authenticate, route, call upstream, cost, audit. Streamed or not."""
 
 import json
 import time
@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -21,7 +21,6 @@ from app.errors import (
     model_not_found,
     payload_too_large,
     server_error,
-    unsupported_parameter,
     upstream_error,
     upstream_rate_limited,
     upstream_rejected,
@@ -39,6 +38,7 @@ from app.providers.base import (
 from app.providers.openai import PROVIDER as OPENAI_PROVIDER
 from app.schemas import ChatCompletionRequest, validate_supported
 from app.services.cost import compute_cost, resolve_price
+from app.services.streaming import stream_completion
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -66,8 +66,6 @@ async def _parse_request(request: Request) -> ChatCompletionRequest:
     except ValidationError as exc:
         raise from_validation_error(exc) from exc
     validate_supported(body)
-    if body.stream:
-        raise unsupported_parameter("Unsupported parameter: 'stream' is not supported yet.")
     return body
 
 
@@ -87,17 +85,19 @@ def _resolve_route(model: str) -> ModelRoute:
     return route
 
 
-def _create_request_row(request_id: str, key: VirtualKey, route: ModelRoute, model: str) -> None:
+def _create_request_row(
+    request_id: str, key: VirtualKey, route: ModelRoute, body: ChatCompletionRequest
+) -> None:
     with session_scope() as session:
         session.add(
             RequestRow(
                 id=request_id,
                 key_id=key.id,
-                model=model,
+                model=body.model,
                 provider=route.provider,
                 provider_model=route.provider_model,
                 status="in_flight",
-                streamed=False,
+                streamed=body.stream,
                 cache_hit=False,
                 created_at=utcnow(),
             )
@@ -174,45 +174,60 @@ def _failure_to_error(failure: ProviderFailure) -> GatewayError:
     return upstream_error()
 
 
+def _record_failure(
+    request_id: str, route: ModelRoute, failure: ProviderFailure, started: float
+) -> GatewayError:
+    """Record one failed attempt, finalize the request row, and map the failure to an error."""
+    error = _failure_to_error(failure)
+    _record_attempt(request_id, route, failure.outcome, failure.status_code, failure.latency_ms)
+    _finalize(
+        request_id,
+        {
+            "status": "failed",
+            "error_code": error.code,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        },
+    )
+    logger.warning(
+        "request.failed",
+        extra={
+            "provider": route.provider,
+            "outcome": failure.outcome,
+            "error_code": error.code,
+        },
+    )
+    return error
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
     key: Annotated[VirtualKey, Depends(require_key)],
-) -> JSONResponse:
+) -> Response:
     body = await _parse_request(request)
     request_id: str = request.state.request_id
     route = _resolve_route(body.model)
 
     try:
-        _create_request_row(request_id, key, route, body.model)
+        _create_request_row(request_id, key, route, body)
     except SQLAlchemyError as exc:
         logger.error("audit.create_failed", extra={"reason": str(exc)})
         raise server_error() from exc
 
     provider = PROVIDERS[route.provider]
+    cache_state = "miss" if key.cache_enabled else "off"
     started = time.perf_counter()
+
+    if body.stream:
+        try:
+            return await stream_completion(provider, body, route, request_id, cache_state)
+        except ProviderFailure as failure:
+            raise _record_failure(request_id, route, failure, started) from failure
+
     try:
         result = await call_provider(provider, body, route.provider_model, request_id)
     except ProviderFailure as failure:
-        error = _failure_to_error(failure)
-        _record_attempt(request_id, route, failure.outcome, failure.status_code, failure.latency_ms)
-        _finalize(
-            request_id,
-            {
-                "status": "failed",
-                "error_code": error.code,
-                "latency_ms": int((time.perf_counter() - started) * 1000),
-            },
-        )
-        logger.warning(
-            "request.failed",
-            extra={
-                "provider": route.provider,
-                "outcome": failure.outcome,
-                "error_code": error.code,
-            },
-        )
-        raise error from failure
+        raise _record_failure(request_id, route, failure, started) from failure
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     _record_attempt(request_id, route, OUTCOME_OK, 200, result.latency_ms)
@@ -230,8 +245,5 @@ async def chat_completions(
     )
     return JSONResponse(
         content=result.response.model_dump(),
-        headers={
-            "X-LGW-Provider": route.provider,
-            "X-LGW-Cache": "miss" if key.cache_enabled else "off",
-        },
+        headers={"X-LGW-Provider": route.provider, "X-LGW-Cache": cache_state},
     )
