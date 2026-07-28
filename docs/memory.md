@@ -78,6 +78,50 @@ work; log every non-obvious decision with its reason. Keep entries short and dat
   `fix(tests): order request ids across a millisecond boundary`. The workflow is green on that
   commit (lint, format check, 33 tests).
 
+## Phase 2 defect review - 2026-07-29
+
+A functionality-first review of the Phase 2 diff (`b44ea69..2ee55fc`) found three accounting
+defects and one test that proved nothing. All four are fixed and pushed; `uv run pytest` is 112
+passed with `ruff` and `black` clean after the last one.
+
+- `fix(streaming): finalize the request when stream translation raises` (dd4fbad). Starlette
+  awaits a response's `BackgroundTask` only when the body iterator ends without raising, and the
+  relay caught just `ProviderFailure` and `httpx.HTTPError`. Anything else a translator can raise
+  on a malformed payload (reproduced with an OpenAI usage chunk whose token counts are `null`,
+  which makes `int(None)` raise `TypeError`) escaped the generator, so the background task never
+  ran: the row stayed `in_flight` forever, no `attempts` row was written, the tokens already
+  generated were never billed, and the upstream socket stayed open. This broke the invariant that
+  every authenticated request ends `ok`, `failed`, or `cut_off`, and it contradicted the
+  "malformed provider response -> failed attempt (`bad_response`)" row in `docs/architecture.md`.
+  The relay now catches `Exception` last, records `bad_response`, and emits the documented SSE
+  error event. `CancelledError` and `GeneratorExit` are `BaseException`, so a disconnected client
+  still reaches the `cut_off` path untouched.
+- `fix(providers): treat anthropic message_start output tokens as provisional` (97a74d5, formatted
+  in 57cab0f). `message_start` carries the final `input_tokens` but only the `output_tokens`
+  emitted so far, which is 1. The adapter reported both, so a stream that died or was cut off
+  before `message_delta` was billed for one output token with `tokens_estimated = false`: 400
+  characters of generated text cost 0.000075 instead of 0.000234. `docs/architecture.md` assigns
+  input to `message_start` and output to `message_delta` for exactly this reason. Only the input
+  count is reported now, so the `ceil(chars/4)` fallback applies and is flagged.
+- `fix(providers): report gemini stream usage only when the chunk carries it` (8a4c53a). An absent
+  `candidatesTokenCount` was read as zero, so a `usageMetadata` block that predates any output
+  recorded zero completion tokens as provider-reported and billed the output as free. Both counts
+  are now emitted only when the chunk actually carries them.
+- `test(streaming): assert the restoration buffer's hold bound` (3ba6e2f). The old test pushed 200
+  `x` characters, which can never begin a placeholder, so it passed for any hold limit including
+  an unbounded one. The replacement feeds a partial placeholder from a pathological 112-character
+  map entry and asserts the hold stays within `MAX_PLACEHOLDER_CHARS`; removing the `min(...)` cap
+  makes it fail.
+
+Reviewed and found sound: the reservation-free parts of the relay's ordering (usage events are
+applied before the finish frame for all three providers), the `include_usage` split between what
+is requested upstream and what is forwarded, pre-first-byte failure classification in
+`open_stream`, the restoration buffer's prefix logic, and the absence of secrets or prompt text in
+logs and error envelopes. Two known gaps were left alone as out of Phase 2 scope: `requests.provider`
+is set at row creation rather than on the winning route (Phase 1 code, matters once failover
+exists), and `X-LGW-Provider` / `X-LGW-Cache` are absent from error responses although
+`docs/api-contracts.md` lists them on every completion response.
+
 ## Project status
 
 - Phases 1 and 2 complete and pushed. Phase 3 (route table and CLI, failover, race-safe budgets)
