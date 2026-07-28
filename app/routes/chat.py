@@ -28,6 +28,7 @@ from app.errors import (
 from app.logging import get_logger
 from app.models import Attempt, ModelRoute, VirtualKey, utcnow
 from app.models import Request as RequestRow
+from app.providers.anthropic import PROVIDER as ANTHROPIC_PROVIDER
 from app.providers.base import (
     OUTCOME_OK,
     OUTCOME_RATE_LIMITED,
@@ -43,7 +44,10 @@ from app.services.streaming import stream_completion
 router = APIRouter()
 logger = get_logger(__name__)
 
-PROVIDERS = {OPENAI_PROVIDER.name: OPENAI_PROVIDER}
+PROVIDERS = {
+    OPENAI_PROVIDER.name: OPENAI_PROVIDER,
+    ANTHROPIC_PROVIDER.name: ANTHROPIC_PROVIDER,
+}
 
 
 async def _parse_request(request: Request) -> ChatCompletionRequest:

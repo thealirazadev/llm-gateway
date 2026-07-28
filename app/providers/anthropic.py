@@ -5,6 +5,7 @@ is mandatory upstream so it falls back to the configured default, and stop reaso
 the canonical OpenAI values.
 """
 
+import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -12,12 +13,15 @@ from typing import Any
 
 from app.config import ANTHROPIC_API_VERSION, ANTHROPIC_BASE_URL, get_settings
 from app.providers.base import (
+    OUTCOME_BAD_RESPONSE,
     OUTCOME_CONNECT_ERROR,
+    OUTCOME_HTTP_ERROR,
     Provider,
     ProviderCall,
     ProviderFailure,
     ProviderResult,
     StreamEvent,
+    sse_data,
 )
 from app.schemas import ChatCompletionRequest, ChatCompletionResponse
 
@@ -27,6 +31,18 @@ FINISH_REASONS = {
     "max_tokens": "length",
     "refusal": "content_filter",
 }
+
+
+def _decode_event(data: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(data)
+    except ValueError as exc:
+        raise ProviderFailure(
+            OUTCOME_BAD_RESPONSE, "anthropic sent a malformed stream event."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ProviderFailure(OUTCOME_BAD_RESPONSE, "anthropic sent a malformed stream event.")
+    return payload
 
 
 class AnthropicProvider(Provider):
@@ -111,9 +127,41 @@ class AnthropicProvider(Provider):
         )
 
     async def translate_stream(self, lines: AsyncIterator[str]) -> AsyncIterator[StreamEvent]:
-        """Stream translation lands in the next commit; this adapter is unrouted until then."""
-        raise NotImplementedError
-        yield StreamEvent()
+        """Map Anthropic's typed events onto canonical chunks.
+
+        Input tokens arrive once on `message_start`; the running output count arrives on
+        `message_delta`, whose last value is the final one.
+        """
+        async for data in sse_data(lines):
+            payload = _decode_event(data)
+            kind = payload.get("type")
+            if kind == "message_start":
+                usage = (payload.get("message") or {}).get("usage") or {}
+                yield StreamEvent(
+                    role="assistant",
+                    prompt_tokens=int(usage.get("input_tokens", 0)),
+                    completion_tokens=int(usage.get("output_tokens", 0)),
+                )
+            elif kind == "content_block_delta":
+                delta = payload.get("delta") or {}
+                if delta.get("type") == "text_delta":
+                    yield StreamEvent(content=str(delta.get("text", "")))
+            elif kind == "message_delta":
+                usage = payload.get("usage") or {}
+                stop_reason = (payload.get("delta") or {}).get("stop_reason")
+                yield StreamEvent(
+                    # An unrecognised stop reason still terminates the stream for the client.
+                    finish_reason=FINISH_REASONS.get(stop_reason, "stop") if stop_reason else None,
+                    completion_tokens=(
+                        int(usage["output_tokens"]) if "output_tokens" in usage else None
+                    ),
+                )
+            elif kind == "error":
+                error = payload.get("error") or {}
+                raise ProviderFailure(
+                    OUTCOME_HTTP_ERROR,
+                    str(error.get("message") or "anthropic failed mid-stream."),
+                )
 
     def translate_error(self, status_code: int, payload: dict[str, Any] | None) -> str:
         error = (payload or {}).get("error")
