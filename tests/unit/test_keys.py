@@ -1,4 +1,5 @@
 import hashlib
+import time
 
 from app.auth import KEY_BODY_CHARS, KEY_PREFIX, generate_key, hash_key
 from app.logging import new_request_id
@@ -25,7 +26,14 @@ def test_hash_key_is_stable() -> None:
 
 def test_request_ids_are_26_chars_and_time_ordered() -> None:
     first = new_request_id()
+    # Ordering comes from the millisecond timestamp prefix; ids minted inside one
+    # millisecond differ only in their random suffix and have no defined order.
+    time.sleep(0.002)
     second = new_request_id()
     assert len(first) == 26
     assert set(first) <= set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
-    assert first <= second
+    assert first < second
+
+
+def test_request_ids_are_unique() -> None:
+    assert len({new_request_id() for _ in range(200)}) == 200
