@@ -7,7 +7,7 @@ from fastapi.responses import Response
 
 from app.errors import REQUEST_ID_HEADER, register_exception_handlers
 from app.logging import configure_logging, new_request_id, request_id_var
-from app.routes import chat, health
+from app.routes import chat, health, models
 
 Handler = Callable[[Request], Awaitable[Response]]
 
@@ -31,6 +31,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(chat.router)
+    app.include_router(models.router)
     return app
 
 
