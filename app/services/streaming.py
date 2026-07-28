@@ -16,6 +16,7 @@ import httpx
 from fastapi.responses import StreamingResponse
 from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.background import BackgroundTask
 
 from app.db import session_scope
 from app.errors import envelope, upstream_error
@@ -101,7 +102,8 @@ class RestorationBuffer:
 
 @dataclass
 class _StreamState:
-    status: str = "failed"
+    # A stream that neither completes nor fails upstream was cut off by the client.
+    status: str = "cut_off"
     outcome: str = OUTCOME_OK
     error_code: str | None = None
     prompt_tokens: int | None = None
@@ -270,10 +272,12 @@ async def stream_completion(
             yield SSE_DONE
             state.status = "ok"
         except ProviderFailure as failure:
+            state.status = "failed"
             state.outcome = failure.outcome
             state.error_code = "upstream_error"
             yield error_frame(failure.message)
         except httpx.HTTPError as exc:
+            state.status = "failed"
             state.outcome = (
                 OUTCOME_TIMEOUT
                 if isinstance(exc, httpx.TimeoutException)
@@ -281,9 +285,18 @@ async def stream_completion(
             )
             state.error_code = "upstream_error"
             yield error_frame(None)
-        finally:
-            await _close(upstream, request_id)
-            _persist(route, request_id, body, state, started)
+
+    async def finish() -> None:
+        """Close upstream and account for the stream however it ended.
+
+        A client that disappears mid-stream leaves the relay suspended forever, so this
+        cannot live in the generator: Starlette cancels the send task and runs the response
+        background task afterwards, which is the one point every ending passes through.
+        Tokens already generated were billed by the provider and are never refunded, so the
+        row is finalized `cut_off` with the cost observed so far.
+        """
+        await _close(upstream, request_id)
+        _persist(route, request_id, body, state, started)
 
     return StreamingResponse(
         relay(),
@@ -294,6 +307,7 @@ async def stream_completion(
             "X-LGW-Provider": route.provider,
             "X-LGW-Cache": cache_state,
         },
+        background=BackgroundTask(finish),
     )
 
 
