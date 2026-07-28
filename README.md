@@ -14,9 +14,9 @@ incident, customer PII flowing to third-party APIs unredacted, and no single ans
 we spend, where, on which app, last month". llm-gateway is one control point that fixes all five,
 self-hosted, with zero required infrastructure beyond Python and SQLite.
 
-## Planned features
+## Features
 
-All of the following is planned, not yet implemented; see the status line below.
+The full target feature set; the status section below says what is implemented today.
 
 - OpenAI-compatible `POST /v1/chat/completions` (streaming and non-streaming) in front of
   OpenAI, Anthropic, and Gemini, with per-provider wire-format translation.
@@ -44,6 +44,50 @@ All of the following is planned, not yet implemented; see the status line below.
 - httpx for upstream calls (no provider SDKs)
 - pytest + pytest-asyncio; uv, ruff, black
 
+## Run it
+
+Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync                                   # install pinned dependencies
+cp .env.example .env                      # then set OPENAI_API_KEY
+uv run alembic upgrade head               # create the schema
+uv run python -m app.cli keys create --name dev   # prints the key once
+uv run python -m app.cli prices add openai gpt-4.1-mini --input 0.40 --output 1.60
+uv run uvicorn app.main:app               # serves on http://127.0.0.1:8000
+```
+
+Route the public model name to a provider model. The `lgw routes` commands arrive with the
+routing phase, so for now insert the row directly:
+
+```bash
+sqlite3 data/gateway.db "INSERT INTO model_routes (model, position, provider, provider_model, active)
+  VALUES ('gpt-4.1-mini', 1, 'openai', 'gpt-4.1-mini', 1);"
+```
+
+Then point any OpenAI client at the gateway:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer lgw_..." \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+Every response carries `X-LGW-Request-Id`, `X-LGW-Provider`, and `X-LGW-Cache`, and every request
+writes an audit row with tokens, cost, and the price row used.
+
+## Test it
+
+```bash
+uv run pytest                             # full suite, hermetic, no network
+uv run ruff check .                       # lint
+uv run black --check .                    # formatting
+```
+
+The suite never calls a provider: upstreams are `httpx.MockTransport` fixtures and each test runs
+against its own migrated SQLite file.
+
 ## Documentation
 
 | Document | Contents |
@@ -60,6 +104,8 @@ All of the following is planned, not yet implemented; see the status line below.
 
 ## Status
 
-Planning stage: documentation only, no implementation yet. Implementation follows
-[docs/phases.md](docs/phases.md) one phase at a time, starting after owner review of these
-documents.
+Phase 1 is implemented: config, structured logging, the error envelope, the full schema and
+migration, virtual-key authentication, key and price management in the CLI, the versioned cost
+calculator, the OpenAI adapter, and non-streaming `POST /v1/chat/completions` with an audit row.
+Streaming, the other two providers, failover, budgets, PII redaction, and the semantic cache land
+in later phases. Implementation follows [docs/phases.md](docs/phases.md) one phase at a time.
