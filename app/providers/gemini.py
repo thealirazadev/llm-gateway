@@ -5,18 +5,22 @@ Translation only: system messages become `systemInstruction`, the assistant role
 canonical OpenAI values.
 """
 
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 from app.config import GEMINI_BASE_URL, get_settings
 from app.providers.base import (
+    OUTCOME_BAD_RESPONSE,
     OUTCOME_CONNECT_ERROR,
+    OUTCOME_HTTP_ERROR,
     Provider,
     ProviderCall,
     ProviderFailure,
     ProviderResult,
     StreamEvent,
+    sse_data,
 )
 from app.schemas import ChatCompletionRequest, ChatCompletionResponse
 
@@ -32,6 +36,18 @@ FINISH_REASONS = {
 def _text_of(candidate: dict[str, Any]) -> str:
     parts = (candidate.get("content") or {}).get("parts") or []
     return "".join(str(part.get("text", "")) for part in parts)
+
+
+def _decode_chunk(data: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(data)
+    except ValueError as exc:
+        raise ProviderFailure(
+            OUTCOME_BAD_RESPONSE, "gemini sent a malformed stream chunk."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ProviderFailure(OUTCOME_BAD_RESPONSE, "gemini sent a malformed stream chunk.")
+    return payload
 
 
 class GeminiProvider(Provider):
@@ -124,9 +140,37 @@ class GeminiProvider(Provider):
         )
 
     async def translate_stream(self, lines: AsyncIterator[str]) -> AsyncIterator[StreamEvent]:
-        """Stream translation lands in the next commit; this adapter is unrouted until then."""
-        raise NotImplementedError
-        yield StreamEvent()
+        """Map `streamGenerateContent` chunks onto canonical chunks.
+
+        Gemini repeats `usageMetadata` on chunks with cumulative counts, so the last one seen
+        is the authoritative usage. The opening role delta has no Gemini equivalent and is
+        synthesised once, before any content.
+        """
+        role_sent = False
+        async for data in sse_data(lines):
+            payload = _decode_chunk(data)
+            error = payload.get("error")
+            if isinstance(error, dict):
+                raise ProviderFailure(
+                    OUTCOME_HTTP_ERROR,
+                    str(error.get("message") or "gemini failed mid-stream."),
+                )
+            usage = payload.get("usageMetadata") or {}
+            if not role_sent:
+                role_sent = True
+                yield StreamEvent(role="assistant")
+            for candidate in payload.get("candidates") or []:
+                text = _text_of(candidate)
+                finish = candidate.get("finishReason")
+                if text:
+                    yield StreamEvent(content=text)
+                if finish:
+                    yield StreamEvent(finish_reason=FINISH_REASONS.get(finish, "stop"))
+            if usage:
+                yield StreamEvent(
+                    prompt_tokens=int(usage.get("promptTokenCount", 0)),
+                    completion_tokens=int(usage.get("candidatesTokenCount", 0)),
+                )
 
     def translate_error(self, status_code: int, payload: dict[str, Any] | None) -> str:
         error = (payload or {}).get("error")

@@ -36,6 +36,7 @@ from app.providers.base import (
     ProviderResult,
     call_provider,
 )
+from app.providers.gemini import PROVIDER as GEMINI_PROVIDER
 from app.providers.openai import PROVIDER as OPENAI_PROVIDER
 from app.schemas import ChatCompletionRequest, validate_supported
 from app.services.cost import compute_cost, resolve_price
@@ -47,6 +48,7 @@ logger = get_logger(__name__)
 PROVIDERS = {
     OPENAI_PROVIDER.name: OPENAI_PROVIDER,
     ANTHROPIC_PROVIDER.name: ANTHROPIC_PROVIDER,
+    GEMINI_PROVIDER.name: GEMINI_PROVIDER,
 }
 
 
