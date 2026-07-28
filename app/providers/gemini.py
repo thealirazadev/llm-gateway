@@ -167,9 +167,18 @@ class GeminiProvider(Provider):
                 if finish:
                     yield StreamEvent(finish_reason=FINISH_REASONS.get(finish, "stop"))
             if usage:
+                # Gemini omits `candidatesTokenCount` on chunks that produced no output yet.
+                # Reading an absent count as zero would report free output as provider-reported
+                # usage; leaving it unset keeps the flagged estimate fallback.
                 yield StreamEvent(
-                    prompt_tokens=int(usage.get("promptTokenCount", 0)),
-                    completion_tokens=int(usage.get("candidatesTokenCount", 0)),
+                    prompt_tokens=(
+                        int(usage["promptTokenCount"]) if "promptTokenCount" in usage else None
+                    ),
+                    completion_tokens=(
+                        int(usage["candidatesTokenCount"])
+                        if "candidatesTokenCount" in usage
+                        else None
+                    ),
                 )
 
     def translate_error(self, status_code: int, payload: dict[str, Any] | None) -> str:

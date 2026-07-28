@@ -130,6 +130,36 @@ async def test_gemini_streamed_returns_openai_chunks_with_reported_usage(
     assert row.completion_tokens == 96
 
 
+async def test_gemini_usage_without_an_output_count_falls_back_to_the_estimate(
+    client: httpx.AsyncClient, api_key: str, seed_route, seed_price, upstream
+) -> None:
+    """`usageMetadata` omits `candidatesTokenCount` until output exists.
+
+    Reading the absent field as zero would bill nothing for generated output and record it as
+    provider-reported, which is exactly the case `tokens_estimated` exists to expose.
+    """
+    route(seed_route, seed_price)
+    upstream(
+        sse_upstream(
+            gemini_chunk("Hello ", usage={"promptTokenCount": 184, "totalTokenCount": 184}),
+            gemini_chunk("there."),
+            gemini_chunk("", finish="STOP"),
+        )
+    )
+
+    body = dict(BODY, stream=True)
+    response = await client.post("/v1/chat/completions", headers=auth(api_key), json=body)
+
+    assert sse_payloads(response.text)[-1] == "[DONE]"
+    with session_scope() as session:
+        row = session.scalar(select(RequestRow))
+    assert row.status == "ok"
+    assert row.prompt_tokens == 184
+    assert row.tokens_estimated is True
+    assert row.completion_tokens == 3  # ceil(len("Hello there.") / 4)
+    assert Decimal(row.cost_usd) == Decimal("0.000078")
+
+
 async def test_gemini_400_surfaces_the_upstream_message(
     client: httpx.AsyncClient, api_key: str, seed_route, seed_price, upstream
 ) -> None:
