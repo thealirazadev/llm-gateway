@@ -5,7 +5,7 @@ import json
 import pytest
 
 from app.schemas import ChatCompletionChunk, ChunkChoice, ChunkDelta, Usage, chunk_json
-from app.services.streaming import RestorationBuffer
+from app.services.streaming import MAX_PLACEHOLDER_CHARS, RestorationBuffer
 
 MAP = {"<pii_email_1>": "jane@example.com", "<pii_email_10>": "bob@example.com"}
 
@@ -97,7 +97,19 @@ def test_a_stream_ending_on_a_partial_placeholder_flushes_it_verbatim() -> None:
     assert buffer.flush() == ""
 
 
-def test_the_buffer_never_holds_more_than_the_longest_placeholder() -> None:
+def test_text_that_cannot_begin_a_placeholder_is_released_immediately() -> None:
     buffer = RestorationBuffer(MAP)
     long_tail = "x" * 200
     assert buffer.push(long_tail) == long_tail
+
+
+def test_the_hold_is_capped_by_the_bound_not_by_the_longest_placeholder() -> None:
+    """A pathological map must not let the relay hold back unbounded generated text."""
+    oversized = "<pii_email_" + "9" * 100 + ">"
+    buffer = RestorationBuffer({oversized: "jane@example.com"})
+    partial = oversized[:-1]
+
+    released = buffer.push(partial)
+
+    assert len(partial) - len(released) <= MAX_PLACEHOLDER_CHARS
+    assert released + buffer.flush() == partial
