@@ -50,19 +50,11 @@ Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync                                   # install pinned dependencies
-cp .env.example .env                      # then set OPENAI_API_KEY
+cp .env.example .env                      # then set the provider keys you route to
 uv run alembic upgrade head               # create the schema
 uv run python -m app.cli keys create --name dev   # prints the key once
 uv run python -m app.cli prices add openai gpt-4.1-mini --input 0.40 --output 1.60
 uv run uvicorn app.main:app               # serves on http://127.0.0.1:8000
-```
-
-Route the public model name to a provider model. The `lgw routes` commands arrive with the
-routing phase, so for now insert the row directly:
-
-```bash
-sqlite3 data/gateway.db "INSERT INTO model_routes (model, position, provider, provider_model, active)
-  VALUES ('gpt-4.1-mini', 1, 'openai', 'gpt-4.1-mini', 1);"
 ```
 
 Then point any OpenAI client at the gateway:
@@ -76,6 +68,56 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 Every response carries `X-LGW-Request-Id`, `X-LGW-Provider`, and `X-LGW-Cache`, and every request
 writes an audit row with tokens, cost, and the price row used.
+
+## Providers
+
+Three providers sit behind the same OpenAI-shaped surface. Clients always send the OpenAI chat
+format; the gateway translates the request, the response, the stream, and the error.
+
+| Provider | Credential | Upstream API | Notes on translation |
+|---|---|---|---|
+| `openai` | `OPENAI_API_KEY` | `/v1/chat/completions` | Passthrough; usage is requested with `stream_options.include_usage`. |
+| `anthropic` | `ANTHROPIC_API_KEY` | Messages API | System messages hoisted to `system`; `max_tokens` is required upstream and falls back to `LGW_DEFAULT_MAX_OUTPUT_TOKENS`. |
+| `gemini` | `GEMINI_API_KEY` | `generateContent` | System messages hoisted to `systemInstruction`; the `assistant` role becomes `model`; sampling moves into `generationConfig`. |
+
+Finish reasons are normalised to `stop`, `length`, and `content_filter` regardless of provider,
+and token counts always come from what the provider reported, streams included.
+
+A public model name maps to a provider model through `model_routes`. The `lgw routes` commands
+arrive with the routing phase, so for now insert the row directly:
+
+```bash
+sqlite3 data/gateway.db "INSERT INTO model_routes (model, position, provider, provider_model, active)
+  VALUES ('claude-sonnet', 1, 'anthropic', 'claude-3-5-haiku-latest', 1);"
+```
+
+Add a price row for every routed `provider`/`provider_model` pair, otherwise the request is
+served but costed at zero with a `prices.missing` error in the log.
+
+`GET /v1/models` lists every public model that has at least one active route.
+
+## Streaming
+
+Send `"stream": true` and the gateway proxies the upstream SSE stream as OpenAI chunk frames,
+one frame at a time, never buffering the whole answer:
+
+```bash
+curl -N http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer lgw_..." \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4.1-mini", "stream": true,
+       "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+- Usage is captured from the stream for every request, so cost is exact; the final usage chunk
+  is forwarded to the client only when it sent `stream_options: {"include_usage": true}`.
+- A stream that ends without provider usage falls back to a character estimate and the audit
+  row is flagged `tokens_estimated`.
+- An upstream failure before the first byte is an ordinary JSON error. After the first byte the
+  stream ends with one SSE error event and no `[DONE]`, and the tokens already generated are
+  still costed.
+- A client that disconnects mid-stream closes the upstream call immediately; the audit row is
+  finalised `cut_off` with the cost observed so far, since the provider billed for it.
 
 ## Test it
 
@@ -104,8 +146,9 @@ against its own migrated SQLite file.
 
 ## Status
 
-Phase 1 is implemented: config, structured logging, the error envelope, the full schema and
-migration, virtual-key authentication, key and price management in the CLI, the versioned cost
-calculator, the OpenAI adapter, and non-streaming `POST /v1/chat/completions` with an audit row.
-Streaming, the other two providers, failover, budgets, PII redaction, and the semantic cache land
-in later phases. Implementation follows [docs/phases.md](docs/phases.md) one phase at a time.
+Phases 1 and 2 are implemented: config, structured logging, the error envelope, the full schema
+and migration, virtual-key authentication, key and price management in the CLI, the versioned
+cost calculator, non-streaming and streaming `POST /v1/chat/completions` with exact accounting,
+the OpenAI, Anthropic, and Gemini adapters, and `GET /v1/models`. Failover, budgets, PII
+redaction, and the semantic cache land in later phases. Implementation follows
+[docs/phases.md](docs/phases.md) one phase at a time.
