@@ -16,6 +16,36 @@ work; log every non-obvious decision with its reason. Keep entries short and dat
   `POST /v1/chat/completions` with attempt and audit rows, the CI workflow, 32 tests, and README
   run/test instructions.
 
+- 2026-07-29 - Phase 2 shipped in the 9 commits listed in `docs/phases.md`: the SSE relay
+  (`app/services/streaming.py`) with usage capture, `include_usage` injection, ttfb, estimate
+  fallback, mid-stream error events and client-disconnect accounting; the Anthropic and Gemini
+  adapters with request, response, error, and stream translation; `GET /v1/models`; 76 new tests;
+  and README provider and streaming sections. `stream: true` no longer returns 400.
+
+## Verified on 2026-07-29
+
+- `uv run pytest` 108 passed, `uv run ruff check .` clean, `uv run black --check .` clean.
+- Live server on a fresh migrated database (`uvicorn app.main:app`): `GET /health` 200,
+  `GET /v1/models` lists exactly the two models with active routes (the inactive route is
+  absent, order is stable, shape matches `docs/api-contracts.md`), and `GET /v1/models` without
+  a key returns 401.
+- Live streamed request with a dummy `OPENAI_API_KEY` really reached `api.openai.com`, was
+  rejected 401 before the first byte, and came back as an ordinary JSON `upstream_rejected`
+  envelope carrying the upstream message; the audit row is `failed` with cost 0 and one
+  `http_error` attempt. This is the pre-first-byte failover boundary working on the wire.
+- Streaming behaviour under real uvicorn with a mock upstream (`httpx.MockTransport`, since no
+  real provider key exists here): frames arrived one at a time 0.6 s apart, matching the
+  upstream cadence exactly, so nothing is buffered; the row finalized `ok` with provider usage
+  184/96, `tokens_estimated = false`, cost 0.000227, ttfb 1 ms, latency 4208 ms.
+- `curl -N -m 2` killed mid-stream: the client got 4 frames, upstream was closed at once
+  (`request.cut_off` logged 2.0 s in, not after the upstream's remaining 2.8 s of frames), the
+  row is `cut_off` with `tokens_estimated = true` and cost 0.000007 committed, attempt `ok`.
+- `stream_options.include_usage` live: the final usage chunk (empty `choices`, populated
+  `usage`) appears only when the client asked; without it the same stream carries no usage
+  chunk while the row still records exact provider usage.
+- Logs from both live runs are JSON lines with request ids; grep for `lgw_` and for prompt text
+  returned zero hits.
+
 ## Verified on 2026-07-28
 
 - `uv run alembic upgrade head` builds all eight tables plus `alembic_version` on a fresh file.
@@ -31,10 +61,16 @@ work; log every non-obvious decision with its reason. Keep entries short and dat
 
 ## Not verified
 
-- The live-provider checklist item (real `OPENAI_API_KEY` through the OpenAI Python SDK against
-  all three of chat, error shape, and header) was not run: no real provider key is available in
-  this environment, and the test suite is hermetic by design. The path is covered by
-  `httpx.MockTransport` integration tests instead.
+- Every checklist item that needs a real provider answer is unverified in this environment: no
+  real `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` exists here. Specifically not
+  run: "concatenated content identical to the provider's own answer" for any provider, and the
+  Anthropic and Gemini live routes (streamed and not). The network itself is reachable, so the
+  gap is credentials, not connectivity: a streamed call did leave the process and was answered
+  by OpenAI (401 on the dummy key). Everything else in those items is covered by
+  `httpx.MockTransport` tests against the recorded wire shapes, and the streaming lifecycle was
+  additionally exercised end to end under real uvicorn with a mock upstream.
+- The live-provider checklist item from Phase 1 (real key through the OpenAI Python SDK) was not
+  run for the same reason.
 - CI on the first push failed on one test of mine, not on product code: two ULIDs minted inside
   the same millisecond differ only in their random suffix, so asserting they sort in creation
   order was wrong. The test now crosses a millisecond boundary before comparing, shipped as
@@ -43,10 +79,53 @@ work; log every non-obvious decision with its reason. Keep entries short and dat
 
 ## Project status
 
-- Phase 1 complete and pushed. Phase 2 (streaming passthrough, Anthropic and Gemini adapters,
-  `GET /v1/models`) does not start until the owner approves Phase 1.
+- Phases 1 and 2 complete and pushed. Phase 3 (route table and CLI, failover, race-safe budgets)
+  does not start until the owner approves Phase 2.
+- Still carried from Phase 1: route resolution takes the first active `model_routes` row and
+  there is no `lgw routes set`, so the README documents a direct SQL insert. Failover is Phase 3.
 
 ## Decisions log
+
+- 2026-07-29 - Adapters emit a small `StreamEvent` (role, content, finish_reason, token counts)
+  and `services/streaming.py` renders the OpenAI chunk frame. `docs/architecture.md` describes
+  `translate_stream` as an iterator of canonical chunks; the chunk envelope only varies by
+  request id, model, and created timestamp, all provider-independent, so building it in three
+  adapters would have triplicated the framing rules that `docs/api-contracts.md` fixes. The
+  serializer (`schemas.chunk_json`) is the single place that knows the wire shape.
+- 2026-07-29 - Stream finalization runs in the response's `BackgroundTask`, not in the relay
+  generator's `finally`. A client that disconnects leaves the generator suspended at a `yield`
+  forever: Starlette cancels the sending task and the generator is only closed later by garbage
+  collection, so a `finally` would commit cost late or not at all. The background task is the
+  one point every ending passes through, and it runs after the cancel scope is absorbed, so it
+  can still await the upstream close. Verified live: the row was `cut_off` two seconds in, while
+  the mock upstream still had frames queued.
+- 2026-07-29 - `stream_options: {"include_usage": true}` is always sent upstream to OpenAI and
+  the synthetic usage chunk is forwarded to the client only when the client asked for it.
+  Accounting must not depend on a client flag; the client contract must not change because of
+  an internal need.
+- 2026-07-29 - The streaming attempt row is written once, at stream end, with the outcome the
+  stream actually reached (`ok` for a completed or client-cut-off stream, the classified failure
+  for a mid-stream death). Cost still derives from exactly one attempt, because no failover is
+  possible after the first client byte, so the no-double-billing invariant holds unchanged.
+- 2026-07-29 - The placeholder restoration tail buffer landed with the relay even though
+  `services/redaction.py` is Phase 4 work. `docs/architecture.md` files it under Streaming, it
+  is a property of chunk boundaries rather than of detection, and Phase 4 would otherwise have
+  to reopen the relay. It takes the map as an argument, which is empty everywhere in Phase 2, so
+  the zero-redaction fast path (no buffering at all) is what actually runs today. Phase 4 only
+  has to pass the real map.
+- 2026-07-29 - The Anthropic and Gemini adapters were committed one commit before they were
+  added to `PROVIDERS`. Splitting an adapter from its stream translation is only safe if the
+  half-built adapter is unreachable; registering it late means no commit in the series can serve
+  a request the adapter cannot finish.
+- 2026-07-29 - Unknown stop reasons map to `null` on a non-streaming response but to `"stop"`
+  inside a stream. A stream without a terminating chunk hangs SDK parsers, which is a worse
+  failure than an imprecise reason on an unrecognised value.
+- 2026-07-29 - Streaming log lines carry `request_id` in their `extra`. The request-id context
+  variable is reset when the middleware returns, which happens before the body is streamed, so
+  the relay and its background task would otherwise log without one.
+- 2026-07-29 - The client-disconnect test drives the ASGI app with its own `receive`/`send`
+  rather than going through `httpx.ASGITransport`, because that transport buffers the whole
+  response body and can express neither incremental delivery nor a client walking away.
 
 - 2026-07-28 - Database access is synchronous SQLAlchemy called from async handlers, with
   short-lived sessions that are never held across an upstream call. `docs/architecture.md` names
