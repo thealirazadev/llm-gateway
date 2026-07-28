@@ -1,9 +1,11 @@
 """Shared fixtures. Every test runs against a fresh SQLite file built by the migrations,
 and never touches the network: upstreams are httpx.MockTransport handlers."""
 
+import asyncio
+import json
 import os
 import shutil
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture(scope="session", autouse=True)
 def _test_environment() -> Iterator[None]:
     os.environ["OPENAI_API_KEY"] = "sk-test-openai"
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+    os.environ["GEMINI_API_KEY"] = "gemini-test"
     os.environ["DATABASE_URL"] = "sqlite:///:memory:"
     get_settings.cache_clear()
     yield
@@ -137,6 +141,65 @@ async def client(db: Path) -> httpx.AsyncClient:
         transport=transport, base_url="http://gateway.test"
     ) as async_client:
         yield async_client
+
+
+def sse_upstream(
+    *payloads: str,
+    status_code: int = 200,
+    stall: float | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Mock upstream that emits the given SSE payloads one frame at a time.
+
+    `stall` keeps the connection open after the last frame so a test can cut the client off
+    mid-stream; without it the generator simply ends, which is a clean upstream close.
+    """
+
+    async def body() -> AsyncIterator[bytes]:
+        for payload in payloads:
+            yield f"data: {payload}\n\n".encode()
+        if stall is not None:
+            await asyncio.sleep(stall)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code, content=body(), headers={"content-type": "text/event-stream"}
+        )
+
+    return handler
+
+
+def openai_chunk(delta: dict, finish_reason: str | None = None) -> str:
+    return json.dumps(
+        {
+            "id": "chatcmpl-upstream",
+            "object": "chat.completion.chunk",
+            "created": 1753600000,
+            "model": "gpt-4.1-mini",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+    )
+
+
+def openai_usage_chunk(prompt_tokens: int = 184, completion_tokens: int = 96) -> str:
+    return json.dumps(
+        {
+            "id": "chatcmpl-upstream",
+            "object": "chat.completion.chunk",
+            "created": 1753600000,
+            "model": "gpt-4.1-mini",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        }
+    )
+
+
+def sse_payloads(text: str) -> list[str]:
+    """Split an SSE response body back into its `data:` payloads."""
+    return [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
 
 
 def openai_response(
