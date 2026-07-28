@@ -7,6 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Pinned upstream base URLs. Deliberately not configurable: the gateway must never
 # call a host derived from request content.
 OPENAI_BASE_URL = "https://api.openai.com/v1"
+ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+ANTHROPIC_API_VERSION = "2023-06-01"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 
 class Settings(BaseSettings):
