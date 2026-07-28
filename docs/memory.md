@@ -45,6 +45,7 @@ work; log every non-obvious decision with its reason. Keep entries short and dat
   chunk while the row still records exact provider usage.
 - Logs from both live runs are JSON lines with request ids; grep for `lgw_` and for prompt text
   returned zero hits.
+- CI is green on every Phase 2 commit pushed to `main` (lint, format check, 108 tests).
 
 ## Verified on 2026-07-28
 
