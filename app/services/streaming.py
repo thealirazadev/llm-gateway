@@ -24,9 +24,11 @@ from app.logging import get_logger
 from app.models import Attempt, ModelRoute, utcnow
 from app.models import Request as RequestRow
 from app.providers.base import (
+    OUTCOME_BAD_RESPONSE,
     OUTCOME_CONNECT_ERROR,
     OUTCOME_OK,
     OUTCOME_TIMEOUT,
+    UPSTREAM_EXCERPT_CHARS,
     Provider,
     ProviderFailure,
     open_stream,
@@ -284,6 +286,25 @@ async def stream_completion(
                 else OUTCOME_CONNECT_ERROR
             )
             state.error_code = "upstream_error"
+            yield error_frame(None)
+        except Exception as exc:
+            # An exception escaping this generator skips the response background task, which
+            # would leave the row in_flight forever with the tokens already generated unbilled
+            # and the upstream socket open. Anything a translator can raise on a malformed
+            # payload is therefore caught here and recorded as a failed attempt. CancelledError
+            # is a BaseException, so a disconnected client still reaches the cut_off path.
+            state.status = "failed"
+            state.outcome = OUTCOME_BAD_RESPONSE
+            state.error_code = "upstream_error"
+            logger.error(
+                "stream.translation_failed",
+                extra={
+                    "request_id": request_id,
+                    "provider": route.provider,
+                    "error_class": type(exc).__name__,
+                    "reason": str(exc)[:UPSTREAM_EXCERPT_CHARS],
+                },
+            )
             yield error_frame(None)
 
     async def finish() -> None:

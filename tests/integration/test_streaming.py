@@ -9,6 +9,7 @@ from app.db import session_scope
 from app.logging import new_request_id
 from app.models import Attempt, ModelRoute, VirtualKey, utcnow
 from app.models import Request as RequestRow
+from app.providers.base import StreamEvent
 from app.providers.openai import PROVIDER as OPENAI
 from app.schemas import ChatCompletionRequest
 from app.services.streaming import stream_completion
@@ -230,6 +231,49 @@ async def test_a_broken_upstream_connection_mid_stream_is_billed_and_reported(
     assert row.status == "failed"
     assert row.tokens_estimated is True
     assert attempt.outcome == "connect_error"
+
+
+async def test_a_translator_crash_mid_stream_still_finalizes_and_bills_the_request(
+    client: httpx.AsyncClient, api_key: str, seed_route, seed_price, upstream, monkeypatch
+) -> None:
+    """An exception escaping the relay skips the response background task entirely.
+
+    Starlette only awaits the background task when the body iterator ends cleanly, so an
+    unhandled translator error would strand the row `in_flight` with no attempt, no cost, and
+    an open upstream socket. Any exception a malformed payload can provoke has to land on the
+    documented `bad_response` path instead.
+    """
+
+    async def exploding_stream(lines):
+        yield StreamEvent(role="assistant")
+        yield StreamEvent(content="half an answer")
+        raise RuntimeError("translator bug on 4111111111111111")
+
+    seed_route()
+    seed_price()
+    upstream(sse_upstream(*full_stream()))
+    monkeypatch.setattr(OPENAI, "translate_stream", exploding_stream)
+
+    response = await client.post("/v1/chat/completions", headers=auth(api_key), json=BODY)
+
+    assert response.status_code == 200
+    payloads = sse_payloads(response.text)
+    assert "[DONE]" not in payloads
+    assert content_of(payloads[:-1]) == "half an answer"
+    assert json.loads(payloads[-1])["error"]["code"] == "upstream_error"
+    # Internals never reach the client, and neither does anything the payload carried.
+    assert "translator bug" not in response.text
+    assert "4111111111111111" not in response.text
+
+    with session_scope() as session:
+        row = session.scalar(select(RequestRow))
+        attempt = session.scalar(select(Attempt))
+    assert row.status == "failed"
+    assert row.error_code == "upstream_error"
+    assert row.tokens_estimated is True
+    assert row.completion_tokens == 4  # ceil(len("half an answer") / 4)
+    assert Decimal(row.cost_usd) > Decimal("0")
+    assert attempt.outcome == "bad_response"
 
 
 @pytest.mark.parametrize(
