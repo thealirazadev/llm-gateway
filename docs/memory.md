@@ -35,8 +35,11 @@ work; log every non-obvious decision with its reason. Keep entries short and dat
   all three of chat, error shape, and header) was not run: no real provider key is available in
   this environment, and the test suite is hermetic by design. The path is covered by
   `httpx.MockTransport` integration tests instead.
-- GitHub Actions has not reported on the new workflow yet; CI status is unknown until the push
-  lands.
+- CI on the first push failed on one test of mine, not on product code: two ULIDs minted inside
+  the same millisecond differ only in their random suffix, so asserting they sort in creation
+  order was wrong. The test now crosses a millisecond boundary before comparing, shipped as
+  `fix(tests): order request ids across a millisecond boundary`. The workflow is green on that
+  commit (lint, format check, 33 tests).
 
 ## Project status
 
