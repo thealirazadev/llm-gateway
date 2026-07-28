@@ -165,6 +165,44 @@ async def test_anthropic_error_event_mid_stream_terminates_without_done(
     assert row.error_code == "upstream_error"
 
 
+async def test_an_anthropic_stream_that_dies_before_message_delta_is_estimated(
+    client: httpx.AsyncClient, api_key: str, seed_route, seed_price, upstream
+) -> None:
+    """`message_start` carries the final input count but only the output count so far.
+
+    Billing a killed stream from it would charge one output token for content the provider
+    already generated and label the row as provider-reported usage.
+    """
+    route(seed_route, seed_price)
+    generated = "x" * 400
+    upstream(
+        sse_upstream(
+            STREAM[0],
+            STREAM[1],
+            json.dumps(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": generated},
+                }
+            ),
+            json.dumps({"type": "error", "error": {"type": "api_error", "message": "gone"}}),
+        )
+    )
+
+    body = dict(BODY, stream=True)
+    response = await client.post("/v1/chat/completions", headers=auth(api_key), json=body)
+
+    assert "[DONE]" not in sse_payloads(response.text)
+    with session_scope() as session:
+        row = session.scalar(select(RequestRow))
+    assert row.status == "failed"
+    assert row.prompt_tokens == 184
+    assert row.tokens_estimated is True
+    assert row.completion_tokens == 100  # ceil(len(generated) / 4)
+    assert Decimal(row.cost_usd) == Decimal("0.000234")
+
+
 async def test_anthropic_400_surfaces_the_upstream_message(
     client: httpx.AsyncClient, api_key: str, seed_route, seed_price, upstream
 ) -> None:
