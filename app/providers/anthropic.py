@@ -143,9 +143,7 @@ class AnthropicProvider(Provider):
                     # so far (typically 1). Recording that as reported usage would bill a
                     # stream that dies before `message_delta` for one output token and mark it
                     # as provider-reported; leaving it unset keeps the estimate fallback.
-                    prompt_tokens=(
-                        int(usage["input_tokens"]) if "input_tokens" in usage else None
-                    ),
+                    prompt_tokens=(int(usage["input_tokens"]) if "input_tokens" in usage else None),
                 )
             elif kind == "content_block_delta":
                 delta = payload.get("delta") or {}
