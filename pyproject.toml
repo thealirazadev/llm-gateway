@@ -1,0 +1,57 @@
+[project]
+name = "llm-gateway"
+version = "0.1.0"
+description = "Self-hosted OpenAI-compatible LLM gateway with virtual keys, budgets, and cost audit."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn==0.34.0",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.0",
+    "sqlalchemy==2.0.36",
+    "alembic==1.14.0",
+    "httpx==0.28.1",
+]
+
+[project.scripts]
+lgw = "app.cli:main"
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "ruff==0.8.4",
+    "black==24.10.0",
+]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# B008: FastAPI's Depends(...)-as-default-argument is the standard DI pattern, not a bug.
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"migrations/*" = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
