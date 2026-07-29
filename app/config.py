@@ -44,3 +44,18 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+PROVIDER_KEY_FIELDS = {
+    "openai": "openai_api_key",
+    "anthropic": "anthropic_api_key",
+    "gemini": "gemini_api_key",
+}
+
+
+def provider_api_key(provider: str) -> str | None:
+    """The configured credential for a provider, or None when it is absent or unknown."""
+    field = PROVIDER_KEY_FIELDS.get(provider)
+    if field is None:
+        return None
+    return getattr(get_settings(), field)

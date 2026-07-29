@@ -9,13 +9,14 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.auth import generate_key
-from app.config import get_settings
+from app.config import get_settings, provider_api_key
 from app.db import build_engine, session_scope, set_engine
-from app.models import Price, VirtualKey, utcnow
+from app.models import ModelRoute, Price, VirtualKey, utcnow
+from app.services.cost import resolve_price
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -152,6 +153,71 @@ def cmd_keys_set_budget(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _parse_route_spec(spec: str) -> tuple[str, str]:
+    provider, _, provider_model = spec.partition(":")
+    if not provider or not provider_model:
+        _fail(f"route must be PROVIDER:MODEL, got '{spec}'")
+        raise SystemExit(EXIT_USAGE)
+    if provider not in PROVIDERS:
+        _fail(f"unknown provider '{provider}', expected one of {', '.join(PROVIDERS)}")
+        raise SystemExit(EXIT_USAGE)
+    return provider, provider_model
+
+
+def _print_routes(routes: Sequence[ModelRoute]) -> None:
+    current = None
+    for route in routes:
+        if route.model != current:
+            current = route.model
+            print(f"routes for '{route.model}':")
+        suffix = "" if route.active else "  (inactive)"
+        print(f"  {route.position}. {route.provider}:{route.provider_model}{suffix}")
+
+
+def cmd_routes_set(args: argparse.Namespace) -> int:
+    """Replace a model's routes in one transaction, or refuse without touching anything."""
+    specs = [_parse_route_spec(spec) for spec in args.routes]
+    with session_scope() as session:
+        missing: list[str] = []
+        for provider, provider_model in specs:
+            if not provider_api_key(provider):
+                missing.append(f"{provider.upper()}_API_KEY is not configured")
+            if resolve_price(session, provider, provider_model) is None:
+                missing.append(f"no price row for {provider}:{provider_model}")
+        if missing:
+            for message in dict.fromkeys(missing):
+                _fail(message)
+            return EXIT_FAILURE
+        session.execute(delete(ModelRoute).where(ModelRoute.model == args.model))
+        session.flush()
+        for position, (provider, provider_model) in enumerate(specs, start=1):
+            session.add(
+                ModelRoute(
+                    model=args.model,
+                    position=position,
+                    provider=provider,
+                    provider_model=provider_model,
+                    active=True,
+                )
+            )
+    print(f"routes for '{args.model}':")
+    for position, (provider, provider_model) in enumerate(specs, start=1):
+        print(f"  {position}. {provider}:{provider_model}")
+    return EXIT_OK
+
+
+def cmd_routes_list(_: argparse.Namespace) -> int:
+    with session_scope() as session:
+        routes = list(
+            session.scalars(select(ModelRoute).order_by(ModelRoute.model, ModelRoute.position))
+        )
+    if not routes:
+        print("no routes configured")
+        return EXIT_OK
+    _print_routes(routes)
+    return EXIT_OK
+
+
 def _price_text(value: Decimal) -> str:
     quantized = Decimal(value).quantize(Decimal("0.000001"))
     if quantized == quantized.quantize(Decimal("0.01")):
@@ -258,6 +324,18 @@ def build_parser() -> argparse.ArgumentParser:
     set_budget.add_argument("name")
     set_budget.add_argument("usd")
     set_budget.set_defaults(func=cmd_keys_set_budget)
+
+    routes = commands.add_parser("routes", help="manage model routes").add_subparsers(
+        dest="command", required=True
+    )
+
+    set_routes = routes.add_parser("set", help="replace a model's routes in priority order")
+    set_routes.add_argument("model")
+    set_routes.add_argument("routes", nargs="+", metavar="PROVIDER:MODEL")
+    set_routes.set_defaults(func=cmd_routes_set)
+
+    list_routes = routes.add_parser("list", help="list routes by model and priority")
+    list_routes.set_defaults(func=cmd_routes_list)
 
     prices = commands.add_parser(
         "prices", help="manage the append-only price table"
