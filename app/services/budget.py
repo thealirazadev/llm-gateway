@@ -12,9 +12,10 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.orm import Session
 
 from app.db import session_scope
-from app.errors import GatewayError, budget_exceeded
+from app.errors import budget_exceeded
 from app.logging import get_logger
-from app.models import BudgetPeriod, Reservation, VirtualKey, utcnow
+from app.models import BudgetPeriod, Reservation, utcnow
+from app.models import Request as RequestRow
 
 logger = get_logger(__name__)
 
@@ -160,3 +161,62 @@ def release_reservation(
         )
 
     return True
+
+
+def sweep_stale_reservations() -> None:
+    """Release all held reservations past their expiration and mark their requests failed.
+
+    This runs periodically to handle crashes between reserve and commit: if the process dies,
+    the sweeper will eventually release the hold and the budget is freed without operator action.
+    """
+    now = utcnow()
+    with session_scope() as session:
+        # Find all stale reservations.
+        stale = list(
+            session.scalars(
+                select(Reservation).where(
+                    Reservation.state == "held",
+                    Reservation.expires_at <= now,
+                )
+            )
+        )
+
+        for reservation in stale:
+            # Transition to released.
+            rows_affected = session.execute(
+                update(Reservation)
+                .where(
+                    Reservation.id == reservation.id,
+                    Reservation.state == "held",
+                )
+                .values(state="released")
+            ).rowcount
+
+            if rows_affected == 0:
+                # Lost the race to commit or another sweep; skip this one.
+                continue
+
+            # Refund the reserved amount.
+            if reservation.period_id:
+                session.execute(
+                    update(BudgetPeriod)
+                    .where(BudgetPeriod.id == reservation.period_id)
+                    .values(reserved_usd=BudgetPeriod.reserved_usd - reservation.amount_usd)
+                )
+
+            # Mark the request as failed with swept error code.
+            session.execute(
+                update(RequestRow)
+                .where(RequestRow.id == reservation.request_id)
+                .values(
+                    status="failed",
+                    error_code="swept",
+                )
+            )
+            logger.info(
+                "budget.reservation_swept",
+                extra={
+                    "request_id": reservation.request_id,
+                    "amount_usd": str(reservation.amount_usd),
+                },
+            )
