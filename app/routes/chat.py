@@ -10,12 +10,14 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.auth import require_key
 from app.config import get_settings
 from app.db import session_scope
 from app.errors import (
     GatewayError,
+    budget_exceeded,
     from_validation_error,
     invalid_request,
     model_not_found,
@@ -38,9 +40,11 @@ from app.providers.base import (
 )
 from app.providers import PROVIDERS
 from app.schemas import ChatCompletionRequest, validate_supported
-from app.services.cost import compute_cost, resolve_price
+from app.services.budget import commit_reservation, release_reservation, reserve
+from app.services.cost import compute_cost, estimate_tokens, resolve_price
 from app.services.router import resolve_routes, run_attempts
 from app.services.streaming import stream_completion
+from app.schemas import prompt_text
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -88,6 +92,34 @@ def _create_request_row(
                 created_at=utcnow(),
             )
         )
+
+
+def _estimate_budget(
+    session: Session, body: ChatCompletionRequest, routes: list[ModelRoute]
+) -> Decimal | None:
+    """Estimate the worst-case cost across all candidate routes."""
+    if not routes:
+        return None
+
+    prompt_tokens = estimate_tokens(prompt_text(body))
+    output_tokens = body.max_tokens or get_settings().lgw_default_max_output_tokens
+
+    # Get prices for all routes and use the highest.
+    max_input_price = Decimal("0")
+    max_output_price = Decimal("0")
+
+    for route in routes:
+        price = resolve_price(session, route.provider, route.provider_model)
+        if price:
+            if price.input_usd_per_mtok > max_input_price:
+                max_input_price = price.input_usd_per_mtok
+            if price.output_usd_per_mtok > max_output_price:
+                max_output_price = price.output_usd_per_mtok
+
+    estimate_usd = (prompt_tokens / 1000000 * max_input_price) + (
+        output_tokens / 1000000 * max_output_price
+    )
+    return estimate_usd
 
 
 def _record_attempt(
