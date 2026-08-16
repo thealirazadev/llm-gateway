@@ -28,28 +28,22 @@ from app.errors import (
 from app.logging import get_logger
 from app.models import Attempt, ModelRoute, VirtualKey, utcnow
 from app.models import Request as RequestRow
-from app.providers.anthropic import PROVIDER as ANTHROPIC_PROVIDER
 from app.providers.base import (
     OUTCOME_OK,
     OUTCOME_RATE_LIMITED,
     ProviderFailure,
     ProviderResult,
     call_provider,
+    open_stream,
 )
-from app.providers.gemini import PROVIDER as GEMINI_PROVIDER
-from app.providers.openai import PROVIDER as OPENAI_PROVIDER
+from app.providers import PROVIDERS
 from app.schemas import ChatCompletionRequest, validate_supported
 from app.services.cost import compute_cost, resolve_price
+from app.services.router import resolve_routes, run_attempts
 from app.services.streaming import stream_completion
 
 router = APIRouter()
 logger = get_logger(__name__)
-
-PROVIDERS = {
-    OPENAI_PROVIDER.name: OPENAI_PROVIDER,
-    ANTHROPIC_PROVIDER.name: ANTHROPIC_PROVIDER,
-    GEMINI_PROVIDER.name: GEMINI_PROVIDER,
-}
 
 
 async def _parse_request(request: Request) -> ChatCompletionRequest:
@@ -75,24 +69,10 @@ async def _parse_request(request: Request) -> ChatCompletionRequest:
     return body
 
 
-def _resolve_route(model: str) -> ModelRoute:
-    with session_scope() as session:
-        route = session.scalar(
-            select(ModelRoute)
-            .where(ModelRoute.model == model, ModelRoute.active.is_(True))
-            .order_by(ModelRoute.position)
-            .limit(1)
-        )
-    if route is None:
-        raise model_not_found(model)
-    if route.provider not in PROVIDERS:
-        logger.error("route.provider_unavailable", extra={"provider": route.provider})
-        raise upstream_error()
-    return route
 
 
 def _create_request_row(
-    request_id: str, key: VirtualKey, route: ModelRoute, body: ChatCompletionRequest
+    request_id: str, key: VirtualKey, body: ChatCompletionRequest
 ) -> None:
     with session_scope() as session:
         session.add(
@@ -100,8 +80,8 @@ def _create_request_row(
                 id=request_id,
                 key_id=key.id,
                 model=body.model,
-                provider=route.provider,
-                provider_model=route.provider_model,
+                provider=None,
+                provider_model=None,
                 status="in_flight",
                 streamed=body.stream,
                 cache_hit=False,
@@ -162,6 +142,8 @@ def _commit_success(
             .where(RequestRow.id == request_id, RequestRow.status == "in_flight")
             .values(
                 status="ok",
+                provider=route.provider,
+                provider_model=route.provider_model,
                 prompt_tokens=result.prompt_tokens,
                 completion_tokens=result.completion_tokens,
                 cost_usd=cost,
@@ -172,37 +154,6 @@ def _commit_success(
     return cost
 
 
-def _failure_to_error(failure: ProviderFailure) -> GatewayError:
-    if failure.outcome == OUTCOME_RATE_LIMITED:
-        return upstream_rate_limited()
-    if failure.status_code is not None and 400 <= failure.status_code < 500:
-        return upstream_rejected(failure.message)
-    return upstream_error()
-
-
-def _record_failure(
-    request_id: str, route: ModelRoute, failure: ProviderFailure, started: float
-) -> GatewayError:
-    """Record one failed attempt, finalize the request row, and map the failure to an error."""
-    error = _failure_to_error(failure)
-    _record_attempt(request_id, route, failure.outcome, failure.status_code, failure.latency_ms)
-    _finalize(
-        request_id,
-        {
-            "status": "failed",
-            "error_code": error.code,
-            "latency_ms": int((time.perf_counter() - started) * 1000),
-        },
-    )
-    logger.warning(
-        "request.failed",
-        extra={
-            "provider": route.provider,
-            "outcome": failure.outcome,
-            "error_code": error.code,
-        },
-    )
-    return error
 
 
 @router.post("/v1/chat/completions")
@@ -212,28 +163,53 @@ async def chat_completions(
 ) -> Response:
     body = await _parse_request(request)
     request_id: str = request.state.request_id
-    route = _resolve_route(body.model)
+    routes = resolve_routes(body.model)
 
     try:
-        _create_request_row(request_id, key, route, body)
+        _create_request_row(request_id, key, body)
     except SQLAlchemyError as exc:
         logger.error("audit.create_failed", extra={"reason": str(exc)})
         raise server_error() from exc
 
-    provider = PROVIDERS[route.provider]
     cache_state = "miss" if key.cache_enabled else "off"
     started = time.perf_counter()
 
     if body.stream:
+        async def stream_action(provider, route: ModelRoute):
+            upstream = await open_stream(provider, body, route.provider_model)
+            return stream_completion(
+                provider, upstream, body, route, request_id, cache_state, started
+            )
+
         try:
-            return await stream_completion(provider, body, route, request_id, cache_state)
-        except ProviderFailure as failure:
-            raise _record_failure(request_id, route, failure, started) from failure
+            route, response = await run_attempts(routes, request_id, stream_action)
+            return response
+        except GatewayError as error:
+            _finalize(
+                request_id,
+                {
+                    "status": "failed",
+                    "error_code": error.code,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                },
+            )
+            raise
+
+    async def call_action(provider, route: ModelRoute):
+        return await call_provider(provider, body, route.provider_model, request_id)
 
     try:
-        result = await call_provider(provider, body, route.provider_model, request_id)
-    except ProviderFailure as failure:
-        raise _record_failure(request_id, route, failure, started) from failure
+        route, result = await run_attempts(routes, request_id, call_action)
+    except GatewayError as error:
+        _finalize(
+            request_id,
+            {
+                "status": "failed",
+                "error_code": error.code,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+            },
+        )
+        raise
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     _record_attempt(request_id, route, OUTCOME_OK, 200, result.latency_ms)

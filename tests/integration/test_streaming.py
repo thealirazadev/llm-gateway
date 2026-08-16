@@ -1,4 +1,5 @@
 import json
+import time
 from decimal import Decimal
 
 import httpx
@@ -367,8 +368,12 @@ async def test_a_placeholder_split_across_upstream_chunks_is_restored_in_the_rel
         )
 
     body = ChatCompletionRequest.model_validate(dict(BODY))
-    response = await stream_completion(
-        OPENAI, body, route, request_id, "off", {"<pii_email_1>": "jane@example.com"}
+    from app.providers.base import open_stream
+    started = time.perf_counter()
+    upstream_resp = await open_stream(OPENAI, body, route.provider_model)
+    response = stream_completion(
+        OPENAI, upstream_resp, body, route, request_id, "off", started,
+        {"<pii_email_1>": "jane@example.com"}
     )
     frames = [frame async for frame in response.body_iterator]
     await response.background()

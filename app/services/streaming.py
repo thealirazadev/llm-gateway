@@ -1,9 +1,9 @@
 """SSE relay with accounting.
 
-The upstream head is validated before a single byte reaches the client, so a stream rejected
-upstream fails exactly like a non-streaming attempt. Once the first chunk is written the
-attempt is committed: there is no mid-stream provider switch, and the cost of tokens actually
-generated is recorded whether the stream completes or dies upstream.
+The upstream head is validated by the attempt loop before a single byte reaches the client, so
+a stream rejected upstream fails over exactly like a non-streaming attempt. By the time the
+relay starts, the winning route is fixed: there is no mid-stream provider switch, and the cost
+of tokens actually generated is recorded whether the stream completes or dies upstream.
 """
 
 import json
@@ -21,7 +21,7 @@ from starlette.background import BackgroundTask
 from app.db import session_scope
 from app.errors import envelope, upstream_error
 from app.logging import get_logger
-from app.models import Attempt, ModelRoute, utcnow
+from app.models import ModelRoute, utcnow
 from app.models import Request as RequestRow
 from app.providers.base import (
     OUTCOME_BAD_RESPONSE,
@@ -31,7 +31,6 @@ from app.providers.base import (
     UPSTREAM_EXCERPT_CHARS,
     Provider,
     ProviderFailure,
-    open_stream,
 )
 from app.schemas import (
     ChatCompletionChunk,
@@ -43,6 +42,7 @@ from app.schemas import (
     prompt_text,
 )
 from app.services.cost import compute_cost, estimate_tokens, resolve_price
+from app.services.router import record_attempt
 
 logger = get_logger(__name__)
 
@@ -157,23 +157,14 @@ def _persist(
             else:
                 cost = compute_cost(price, prompt_tokens, completion_tokens)
                 price_id = price.id
-            session.add(
-                Attempt(
-                    request_id=request_id,
-                    position=route.position,
-                    provider=route.provider,
-                    provider_model=route.provider_model,
-                    outcome=state.outcome,
-                    status_code=200,
-                    latency_ms=latency_ms,
-                    created_at=utcnow(),
-                )
-            )
+            record_attempt(session, request_id, route, state.outcome, 200, latency_ms)
             session.execute(
                 update(RequestRow)
                 .where(RequestRow.id == request_id, RequestRow.status == "in_flight")
                 .values(
                     status=state.status,
+                    provider=route.provider,
+                    provider_model=route.provider_model,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     tokens_estimated=estimated,
@@ -204,17 +195,17 @@ def _persist(
     )
 
 
-async def stream_completion(
+def stream_completion(
     provider: Provider,
+    upstream: httpx.Response,
     body: ChatCompletionRequest,
     route: ModelRoute,
     request_id: str,
     cache_state: str,
+    started: float,
     placeholders: Mapping[str, str] | None = None,
 ) -> StreamingResponse:
-    """Open the upstream stream, relay it as OpenAI chunks, and account for it exactly once."""
-    started = time.perf_counter()
-    upstream = await open_stream(provider, body, route.provider_model)
+    """Relay an open upstream stream as OpenAI chunks and account for it exactly once."""
     state = _StreamState()
     buffer = RestorationBuffer(placeholders or {})
     created = int(time.time())
