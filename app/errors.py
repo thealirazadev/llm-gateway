@@ -71,6 +71,15 @@ def upstream_rate_limited() -> GatewayError:
     )
 
 
+def budget_exceeded() -> GatewayError:
+    return GatewayError(
+        429,
+        "insufficient_quota",
+        "invalid_request_error",
+        "Monthly budget exceeded.",
+    )
+
+
 def upstream_error(message: str = "The upstream provider is unavailable.") -> GatewayError:
     return GatewayError(502, "upstream_error", "api_error", message)
 
