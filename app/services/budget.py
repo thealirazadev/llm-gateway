@@ -92,7 +92,12 @@ def commit_reservation(
     reservation_id: int,
     actual_cost_usd: Decimal,
 ) -> bool:
-    """Transition a held reservation to committed and update spent. Return True if successful."""
+    """Transition a held reservation to committed and update spent. Return True if successful.
+
+    Only the winner of the conditional UPDATE on state = 'held' succeeds; a race to commit
+    against a sweep will result in one winner. If a sweep beats the commit, the commitment
+    still increments spent; the reserved decrement was already done.
+    """
     rows_affected = session.execute(
         update(Reservation)
         .where(
@@ -105,7 +110,7 @@ def commit_reservation(
     if rows_affected == 0:
         return False
 
-    # Get the reservation to find its period.
+    # Get the reservation to find its period and refund amount.
     reservation = session.get(Reservation, reservation_id)
     if not reservation:
         return False
