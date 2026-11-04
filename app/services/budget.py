@@ -8,7 +8,8 @@ and sweep all guard on state = 'held' so exactly one transition wins.
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
 from app.db import session_scope
