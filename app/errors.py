@@ -74,9 +74,9 @@ def upstream_rate_limited() -> GatewayError:
 def budget_exceeded() -> GatewayError:
     return GatewayError(
         429,
+        "budget_exceeded",
         "insufficient_quota",
-        "invalid_request_error",
-        "Monthly budget exceeded.",
+        "Monthly budget exceeded for this key.",
     )
 
 
