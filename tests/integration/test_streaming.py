@@ -169,6 +169,25 @@ async def test_upstream_rejection_before_the_first_byte_is_a_json_error(
     assert attempt.outcome == "http_error"
 
 
+async def test_a_stream_rejected_for_credentials_does_not_echo_the_provider_message(
+    client: httpx.AsyncClient, api_key: str, seed_route, seed_price, upstream
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401, json={"error": {"message": "Incorrect API key provided: sk-test-****enai."}}
+        )
+
+    seed_route()
+    seed_price()
+    upstream(handler)
+
+    response = await client.post("/v1/chat/completions", headers=auth(api_key), json=BODY)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "upstream_rejected"
+    assert "sk-" not in response.text
+
+
 async def test_upstream_death_mid_stream_ends_with_an_error_event_and_bills_the_chunks(
     client: httpx.AsyncClient, api_key: str, seed_route, seed_price, upstream
 ) -> None:

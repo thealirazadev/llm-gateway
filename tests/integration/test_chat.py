@@ -196,6 +196,23 @@ async def test_upstream_400_message_reaches_the_client(
     assert response.json()["error"]["message"] == "upstream says no"
 
 
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_upstream_credential_errors_do_not_echo_the_provider_message(
+    client: httpx.AsyncClient, api_key: str, seed_route, seed_price, upstream, status_code: int
+) -> None:
+    seed_route()
+    seed_price()
+    message = "Incorrect API key provided: sk-test-****enai."
+    upstream(error_handler(status_code, {"error": {"message": message}}))
+
+    response = await client.post("/v1/chat/completions", headers=auth(api_key), json=BODY)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "upstream_rejected"
+    assert "sk-" not in response.text
+    assert "enai" not in response.text
+
+
 async def test_upstream_timeout_is_recorded_and_returns_502(
     client: httpx.AsyncClient, api_key: str, seed_route, seed_price, upstream
 ) -> None:

@@ -136,6 +136,18 @@ async def sse_data(lines: AsyncIterator[str]) -> AsyncIterator[str]:
                 yield payload
 
 
+# Upstream auth failures are about the gateway's own provider credential, and providers echo
+# parts of the rejected key in the message, so the client only ever sees a generic text.
+_CREDENTIAL_STATUSES = frozenset({401, 403})
+CREDENTIAL_REJECTED_MESSAGE = "The upstream provider rejected the gateway's credentials."
+
+
+def _client_message(provider: Provider, status_code: int, payload: dict[str, Any] | None) -> str:
+    if status_code in _CREDENTIAL_STATUSES:
+        return CREDENTIAL_REJECTED_MESSAGE
+    return provider.translate_error(status_code, payload)
+
+
 def _json_or_none(response: httpx.Response) -> dict[str, Any] | None:
     try:
         payload = response.json()
@@ -183,7 +195,7 @@ async def call_provider(
         outcome = OUTCOME_RATE_LIMITED if response.status_code == 429 else OUTCOME_HTTP_ERROR
         raise ProviderFailure(
             outcome,
-            provider.translate_error(response.status_code, payload),
+            _client_message(provider, response.status_code, payload),
             status_code=response.status_code,
             latency_ms=latency_ms,
         )
@@ -263,8 +275,8 @@ async def open_stream(
         payload = None
     raise ProviderFailure(
         OUTCOME_RATE_LIMITED if response.status_code == 429 else OUTCOME_HTTP_ERROR,
-        provider.translate_error(
-            response.status_code, payload if isinstance(payload, dict) else None
+        _client_message(
+            provider, response.status_code, payload if isinstance(payload, dict) else None
         ),
         status_code=response.status_code,
         latency_ms=latency_ms,
