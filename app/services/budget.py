@@ -209,10 +209,13 @@ def sweep_stale_reservations() -> None:
                     .values(reserved_usd=BudgetPeriod.reserved_usd - reservation.amount_usd)
                 )
 
-            # Mark the request as failed with swept error code.
+            # Mark the request as failed with swept error code, unless it already finished.
             session.execute(
                 update(RequestRow)
-                .where(RequestRow.id == reservation.request_id)
+                .where(
+                    RequestRow.id == reservation.request_id,
+                    RequestRow.status == "in_flight",
+                )
                 .values(
                     status="failed",
                     error_code="swept",
