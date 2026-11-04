@@ -4,6 +4,7 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select, update
 
 from app.db import session_scope
@@ -108,7 +109,7 @@ def test_release_refunds_the_hold_once(db: Path, api_key: str) -> None:
 
 
 def test_sweep_fails_in_flight_requests_but_never_rewrites_finished_ones(
-    db: Path, api_key: str
+    db: Path, api_key: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     key_id = _key_id()
     stale = timedelta(seconds=-1)
@@ -123,7 +124,8 @@ def test_sweep_fails_in_flight_requests_but_never_rewrites_finished_ones(
             .values(status="ok", cost_usd=Decimal("0.10"))
         )
 
-    sweep_stale_reservations()
+    with caplog.at_level("INFO", logger="app.services.budget"):
+        sweep_stale_reservations()
 
     with session_scope() as session:
         stuck_row = session.get(RequestRow, stuck)
@@ -133,3 +135,4 @@ def test_sweep_fails_in_flight_requests_but_never_rewrites_finished_ones(
     assert (finished_row.status, finished_row.error_code) == ("ok", None)
     assert states == {"released"}
     assert _period(key_id).reserved_usd == Decimal("0")
+    assert [record.getMessage() for record in caplog.records] == ["budget.swept"] * 2

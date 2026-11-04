@@ -222,7 +222,7 @@ def sweep_stale_reservations() -> None:
                 )
             )
             logger.info(
-                "budget.reservation_swept",
+                "budget.swept",
                 extra={
                     "request_id": reservation.request_id,
                     "amount_usd": str(reservation.amount_usd),
