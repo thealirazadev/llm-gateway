@@ -46,9 +46,14 @@ async def _parse_request(request: Request) -> ChatCompletionRequest:
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > limit_bytes:
         raise payload_too_large(limit_kb)
-    raw = await request.body()
-    if len(raw) > limit_bytes:
-        raise payload_too_large(limit_kb)
+    # Read incrementally so a chunked body without Content-Length is cut off at the limit
+    # instead of being buffered whole before the size check.
+    received = bytearray()
+    async for chunk in request.stream():
+        received.extend(chunk)
+        if len(received) > limit_bytes:
+            raise payload_too_large(limit_kb)
+    raw = bytes(received)
     try:
         data = json.loads(raw)
     except ValueError as exc:

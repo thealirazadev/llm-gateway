@@ -149,6 +149,30 @@ async def test_oversize_body_returns_413(client: httpx.AsyncClient, api_key: str
     assert response.json()["error"]["code"] == "payload_too_large"
 
 
+async def test_chunked_oversize_body_is_rejected_without_reading_it_all(
+    client: httpx.AsyncClient, api_key: str
+) -> None:
+    sent = 0
+
+    async def endless_body():
+        nonlocal sent
+        yield b'{"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "'
+        while sent < 64 * 1024 * 1024:
+            sent += 64 * 1024
+            yield b"x" * (64 * 1024)
+
+    response = await client.post(
+        "/v1/chat/completions",
+        headers={**auth(api_key), "Content-Type": "application/json"},
+        content=endless_body(),
+    )
+
+    assert "content-length" not in response.request.headers
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
+    assert sent < 1024 * 1024
+
+
 @pytest.mark.parametrize(
     ("status_code", "expected_status", "expected_code", "expected_outcome"),
     [
