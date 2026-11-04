@@ -8,7 +8,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -17,34 +17,24 @@ from app.config import get_settings
 from app.db import session_scope
 from app.errors import (
     GatewayError,
-    budget_exceeded,
     from_validation_error,
     invalid_request,
-    model_not_found,
     payload_too_large,
     server_error,
-    upstream_error,
-    upstream_rate_limited,
-    upstream_rejected,
 )
 from app.logging import get_logger
 from app.models import Attempt, ModelRoute, VirtualKey, utcnow
 from app.models import Request as RequestRow
 from app.providers.base import (
     OUTCOME_OK,
-    OUTCOME_RATE_LIMITED,
-    ProviderFailure,
     ProviderResult,
     call_provider,
     open_stream,
 )
-from app.providers import PROVIDERS
-from app.schemas import ChatCompletionRequest, validate_supported
-from app.services.budget import commit_reservation, release_reservation, reserve
+from app.schemas import ChatCompletionRequest, prompt_text, validate_supported
 from app.services.cost import compute_cost, estimate_tokens, resolve_price
 from app.services.router import resolve_routes, run_attempts
 from app.services.streaming import stream_completion
-from app.schemas import prompt_text
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -73,11 +63,7 @@ async def _parse_request(request: Request) -> ChatCompletionRequest:
     return body
 
 
-
-
-def _create_request_row(
-    request_id: str, key: VirtualKey, body: ChatCompletionRequest
-) -> None:
+def _create_request_row(request_id: str, key: VirtualKey, body: ChatCompletionRequest) -> None:
     with session_scope() as session:
         session.add(
             RequestRow(
@@ -186,8 +172,6 @@ def _commit_success(
     return cost
 
 
-
-
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
@@ -207,6 +191,7 @@ async def chat_completions(
     started = time.perf_counter()
 
     if body.stream:
+
         async def stream_action(provider, route: ModelRoute):
             upstream = await open_stream(provider, body, route.provider_model)
             return stream_completion(

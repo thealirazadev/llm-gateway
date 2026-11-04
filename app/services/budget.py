@@ -12,7 +12,6 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.orm import Session
 
 from app.db import session_scope
-from app.errors import budget_exceeded
 from app.logging import get_logger
 from app.models import BudgetPeriod, Reservation, utcnow
 from app.models import Request as RequestRow
@@ -33,7 +32,10 @@ def reserve(
     estimate_usd: Decimal,
     expires_at: datetime,
 ) -> int | None:
-    """Reserve an estimate against the key's current monthly budget. Return reservation id or None."""
+    """Reserve an estimate against the key's current monthly budget.
+
+    Return the reservation id, or None when the key has no budget or the estimate does not fit.
+    """
     if limit_usd is None:
         return None
 
@@ -42,12 +44,14 @@ def reserve(
 
     # Create period row if it doesn't exist (idempotent).
     session.execute(
-        insert(BudgetPeriod).values(
+        insert(BudgetPeriod)
+        .values(
             key_id=key_id,
             period=period,
             spent_usd=Decimal("0"),
             reserved_usd=Decimal("0"),
-        ).on_conflict_do_nothing()
+        )
+        .on_conflict_do_nothing()
     )
 
     # Get the period row.
