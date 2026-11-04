@@ -54,6 +54,7 @@ cp .env.example .env                      # then set the provider keys you route
 uv run alembic upgrade head               # create the schema
 uv run python -m app.cli keys create --name dev   # prints the key once
 uv run python -m app.cli prices add openai gpt-4.1-mini --input 0.40 --output 1.60
+uv run python -m app.cli routes set gpt-4.1-mini openai:gpt-4.1-mini
 uv run uvicorn app.main:app               # serves on http://127.0.0.1:8000
 ```
 
@@ -83,16 +84,17 @@ format; the gateway translates the request, the response, the stream, and the er
 Finish reasons are normalised to `stop`, `length`, and `content_filter` regardless of provider,
 and token counts always come from what the provider reported, streams included.
 
-A public model name maps to a provider model through `model_routes`. The `lgw routes` commands
-arrive with the routing phase, so for now insert the row directly:
+A public model name maps to one or more provider models, in priority order, through
+`lgw routes set`:
 
 ```bash
-sqlite3 data/gateway.db "INSERT INTO model_routes (model, position, provider, provider_model, active)
-  VALUES ('claude-sonnet', 1, 'anthropic', 'claude-3-5-haiku-latest', 1);"
+uv run python -m app.cli prices add anthropic claude-3-5-haiku-latest --input 0.80 --output 4.00
+uv run python -m app.cli routes set claude-sonnet anthropic:claude-3-5-haiku-latest
+uv run python -m app.cli routes list
 ```
 
-Add a price row for every routed `provider`/`provider_model` pair, otherwise the request is
-served but costed at zero with a `prices.missing` error in the log.
+`routes set` refuses, without changing anything, when a routed provider has no API key or a
+`provider:model` pair has no price row, and the server refuses to start for the same gaps.
 
 `GET /v1/models` lists every public model that has at least one active route.
 
