@@ -1,8 +1,8 @@
 # llm-gateway
 
 A self-hosted LLM API gateway: one OpenAI-compatible endpoint in front of OpenAI, Anthropic, and
-Gemini, with virtual keys, hard monthly budgets, automatic failover, PII redaction, a semantic
-response cache, and a complete cost audit trail. Point any OpenAI SDK at it by changing
+Gemini, with virtual keys, hard monthly budgets, automatic failover, and a complete cost audit
+trail. PII redaction and a semantic response cache are planned. Point any OpenAI SDK at it by changing
 `base_url` and `api_key`; the gateway handles provider routing, wire-format translation, and the
 accounting.
 
@@ -28,14 +28,14 @@ The full target feature set; the status section below says what is implemented t
   disconnect.
 - Cost tracking per request from an append-only, versioned price table: historical reports never
   change when prices do.
-- PII redaction (emails, phone numbers, credit cards) applied before prompts leave the gateway,
+- Planned: PII redaction (emails, phone numbers, credit cards) applied before prompts leave the gateway,
   reversed on the response via an in-memory placeholder map, streaming included.
-- Opt-in semantic response cache (exact match plus embedding similarity), scoped per key, with
+- Planned: opt-in semantic response cache (exact match plus embedding similarity), scoped per key, with
   optional Redis acceleration and a pure-SQLite default.
 - Structured audit log of every request (key, provider, model, tokens, cost, latency, cache
   state) with no prompt bodies stored.
-- `lgw` admin CLI: key, route, and price management plus usage reports as tables or JSON with a
-  spend reconciliation check.
+- `lgw` admin CLI: key, route, and price management. Usage reports with a spend reconciliation
+  check are planned.
 
 ## Stack
 
@@ -83,13 +83,19 @@ format; the gateway translates the request, the response, the stream, and the er
 Finish reasons are normalised to `stop`, `length`, and `content_filter` regardless of provider,
 and token counts always come from what the provider reported, streams included.
 
-A public model name maps to a provider model through `model_routes`. The `lgw routes` commands
-arrive with the routing phase, so for now insert the row directly:
+A public model name maps to one or more provider models through `model_routes`, tried in the
+order given. A timeout, connection failure, 5xx, or 429 moves on to the next route; any other 4xx
+is returned to the client without failover. Only the route that answered is billed:
 
 ```bash
-sqlite3 data/gateway.db "INSERT INTO model_routes (model, position, provider, provider_model, active)
-  VALUES ('claude-sonnet', 1, 'anthropic', 'claude-3-5-haiku-latest', 1);"
+uv run lgw routes set claude-sonnet anthropic:claude-3-5-haiku-latest openai:gpt-4.1-mini
+uv run lgw keys set-budget my-app 50
 ```
+
+A key with a monthly budget holds the worst-case cost of each request before calling upstream,
+then commits the actual cost or releases the hold. A request that does not fit gets 429
+`insufficient_quota`. Holds left by a crash are released by a sweeper after
+`LGW_RESERVATION_TTL_SECONDS`.
 
 Add a price row for every routed `provider`/`provider_model` pair, otherwise the request is
 served but costed at zero with a `prices.missing` error in the log.
@@ -149,6 +155,9 @@ against its own migrated SQLite file.
 Phases 1 and 2 are implemented: config, structured logging, the error envelope, the full schema
 and migration, virtual-key authentication, key and price management in the CLI, the versioned
 cost calculator, non-streaming and streaming `POST /v1/chat/completions` with exact accounting,
-the OpenAI, Anthropic, and Gemini adapters, and `GET /v1/models`. Failover, budgets, PII
-redaction, and the semantic cache land in later phases. Implementation follows
+the OpenAI, Anthropic, and Gemini adapters, and `GET /v1/models`.
+
+Phase 3 is implemented except the `lgw usage` report: route management, startup validation,
+priority failover, and race-safe monthly budgets with a scheduled sweeper, covered by failover and
+concurrency tests. PII redaction and the semantic cache (phase 4) are not built yet. Implementation follows
 [docs/phases.md](docs/phases.md) one phase at a time.

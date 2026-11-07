@@ -22,6 +22,20 @@ work; log every non-obvious decision with its reason. Keep entries short and dat
   adapters with request, response, error, and stream translation; `GET /v1/models`; 76 new tests;
   and README provider and streaming sections. `stream: true` no longer returns 400.
 
+- 2026-11-08 - Phase 3 mostly shipped. Route management, startup validation, failover, and the
+  budget service already existed; this work wired budgets into the request path (hold before the
+  upstream call, settle on success, failure, and stream end), scheduled the sweeper in the app
+  lifespan, fixed the reserve upsert (generic `insert` has no `on_conflict_do_nothing`; it needs
+  the SQLite dialect insert) and a float-times-Decimal crash in the estimate, and guarded the
+  sweep's request update on `in_flight`. 16 new tests cover failover billing, budget rejection,
+  commit, release, streaming settlement, a 10-request concurrency race, and the sweeper.
+  Not done: `lgw usage` with `--verify` (commit 7 of phase 3).
+
+## Verified on 2026-11-08
+
+- `.venv/bin/pytest` 124 passed (three consecutive runs), `ruff check .` clean,
+  `black --check .` clean. No live provider calls were made.
+
 ## Verified on 2026-07-29
 
 - `uv run pytest` 108 passed, `uv run ruff check .` clean, `uv run black --check .` clean.
