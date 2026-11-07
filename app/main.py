@@ -1,7 +1,8 @@
 """App factory: logging, request ids, error envelope, routes, startup validation."""
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
@@ -13,11 +14,15 @@ from app.errors import REQUEST_ID_HEADER, register_exception_handlers
 from app.logging import configure_logging, get_logger, new_request_id, request_id_var
 from app.models import ModelRoute
 from app.routes import chat, health, models
+from app.services.budget import sweep_stale_reservations
 from app.services.cost import resolve_price
 
 Handler = Callable[[Request], Awaitable[Response]]
 
 logger = get_logger(__name__)
+
+
+SWEEP_INTERVAL_SECONDS = 60
 
 
 def validate_configuration() -> list[str]:
@@ -60,7 +65,21 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             logger.error("startup.invalid", extra={"problem": problem})
         raise RuntimeError("startup validation failed: " + "; ".join(problems))
     logger.info("startup.validated")
+    sweeper = asyncio.create_task(_sweep_forever())
     yield
+    sweeper.cancel()
+    with suppress(asyncio.CancelledError):
+        await sweeper
+
+
+async def _sweep_forever() -> None:
+    """Free holds left by requests that never settled, such as after a crash mid-request."""
+    while True:
+        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+        try:
+            sweep_stale_reservations()
+        except Exception:  # a transient database error must not stop future sweeps
+            logger.exception("budget.sweep_failed")
 
 
 def create_app() -> FastAPI:
