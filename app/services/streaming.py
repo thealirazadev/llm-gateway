@@ -21,7 +21,7 @@ from starlette.background import BackgroundTask
 from app.db import session_scope
 from app.errors import envelope, upstream_error
 from app.logging import get_logger
-from app.models import ModelRoute, utcnow
+from app.models import ModelRoute
 from app.models import Request as RequestRow
 from app.providers.base import (
     OUTCOME_BAD_RESPONSE,
@@ -41,6 +41,7 @@ from app.schemas import (
     chunk_json,
     prompt_text,
 )
+from app.services.budget import settle_request
 from app.services.cost import compute_cost, estimate_tokens, resolve_price
 from app.services.router import record_attempt
 
@@ -175,6 +176,7 @@ def _persist(
                     error_code=state.error_code,
                 )
             )
+            settle_request(session, request_id, cost)
     except SQLAlchemyError as exc:
         logger.error("audit.finalize_failed", extra={"request_id": request_id, "reason": str(exc)})
         return

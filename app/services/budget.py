@@ -8,11 +8,11 @@ and sweep all guard on state = 'held' so exactly one transition wins.
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
 from app.db import session_scope
-from app.errors import budget_exceeded
 from app.logging import get_logger
 from app.models import BudgetPeriod, Reservation, utcnow
 from app.models import Request as RequestRow
@@ -33,7 +33,10 @@ def reserve(
     estimate_usd: Decimal,
     expires_at: datetime,
 ) -> int | None:
-    """Reserve an estimate against the key's current monthly budget. Return reservation id or None."""
+    """Reserve an estimate against the key's current monthly budget.
+
+    Return the reservation id, or None when there is no budget or the estimate does not fit.
+    """
     if limit_usd is None:
         return None
 
@@ -42,12 +45,14 @@ def reserve(
 
     # Create period row if it doesn't exist (idempotent).
     session.execute(
-        insert(BudgetPeriod).values(
+        insert(BudgetPeriod)
+        .values(
             key_id=key_id,
             period=period,
             spent_usd=Decimal("0"),
             reserved_usd=Decimal("0"),
-        ).on_conflict_do_nothing()
+        )
+        .on_conflict_do_nothing()
     )
 
     # Get the period row.
@@ -163,6 +168,26 @@ def release_reservation(
     return True
 
 
+def settle_request(session: Session, request_id: str, cost_usd: Decimal) -> None:
+    """Close the request's held reservation, if it has one.
+
+    A request that cost something commits that actual cost; one that cost nothing releases its
+    hold. Requests from keys without a budget have no reservation and are left alone.
+    """
+    reservation_id = session.scalar(
+        select(Reservation.id).where(
+            Reservation.request_id == request_id,
+            Reservation.state == "held",
+        )
+    )
+    if reservation_id is None:
+        return
+    if cost_usd > 0:
+        commit_reservation(session, reservation_id, cost_usd)
+    else:
+        release_reservation(session, reservation_id)
+
+
 def sweep_stale_reservations() -> None:
     """Release all held reservations past their expiration and mark their requests failed.
 
@@ -207,7 +232,10 @@ def sweep_stale_reservations() -> None:
             # Mark the request as failed with swept error code.
             session.execute(
                 update(RequestRow)
-                .where(RequestRow.id == reservation.request_id)
+                .where(
+                    RequestRow.id == reservation.request_id,
+                    RequestRow.status == "in_flight",
+                )
                 .values(
                     status="failed",
                     error_code="swept",
