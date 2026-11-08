@@ -213,7 +213,7 @@ fabricate values. Only successful, non-cut-off responses are cached; entries exp
 
 ## Data model
 
-Table and column names are the contract; the coding agent must not rename them.
+Table and column names are the contract; implementations must not rename them.
 
 ### virtual_keys
 | Field | Type | Notes |
