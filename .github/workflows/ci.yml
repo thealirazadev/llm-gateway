@@ -9,6 +9,10 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -18,10 +22,10 @@ jobs:
           version: "0.11.28"
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install ${{ matrix.python }}
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --python ${{ matrix.python }}
 
       - name: Lint
         run: uv run ruff check .
@@ -29,5 +33,18 @@ jobs:
       - name: Format check
         run: uv run black --check .
 
-      - name: Tests
+      - name: Tests (coverage gate 90 percent)
         run: uv run pytest
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t llm-gateway .
+      - name: Migrates, serves, and runs the CLI
+        run: |
+          docker run -d --name lgw -p 8000:8000 llm-gateway
+          for i in $(seq 30); do curl -sf localhost:8000/health && break; sleep 1; done
+          curl -sf localhost:8000/health
+          docker exec lgw lgw keys create --name ci > /dev/null
+          docker exec lgw lgw keys list | grep -q ci
