@@ -4,6 +4,7 @@ Exit codes: 0 success, 1 operation failure, 2 usage or environment error.
 """
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from app.config import get_settings, provider_api_key
 from app.db import build_engine, session_scope, set_engine
 from app.models import ModelRoute, Price, VirtualKey, utcnow
 from app.services.cost import resolve_price
+from app.services.usage import reconcile, usage_report
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -297,6 +299,83 @@ def cmd_prices_list(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_usage(args: argparse.Namespace) -> int:
+    month = args.month or utcnow().strftime("%Y-%m")
+    try:
+        with session_scope() as session:
+            if args.verify:
+                checks = reconcile(session, month)
+            else:
+                usage = usage_report(session, month, args.key)
+    except ValueError:
+        _fail(f"--month must look like YYYY-MM, got '{month}'")
+        return EXIT_USAGE
+
+    if args.verify:
+        if not checks:
+            print(f"no budgeted keys for {month}")
+            return EXIT_OK
+        for check in checks:
+            status = "ok" if check.ok else "MISMATCH"
+            print(
+                f"{check.name}  {month}  spent={_money(check.spent_usd, '0.0001')}  "
+                f"sum(requests)={_money(check.requests_usd, '0.0001')}  "
+                f"reserved={_money(check.reserved_usd, '0.0001')}  {status}"
+            )
+        return EXIT_OK if all(check.ok for check in checks) else EXIT_FAILURE
+
+    if args.json:
+        payload = {
+            "month": month,
+            "keys": [
+                {
+                    "name": row.name,
+                    "requests": row.requests,
+                    "cache_hits": row.cache_hits,
+                    "prompt_tokens": row.prompt_tokens,
+                    "completion_tokens": row.completion_tokens,
+                    "cost_usd": _money(row.cost_usd, "0.0001"),
+                }
+                for row in usage
+            ],
+            "total_cost_usd": _money(sum((r.cost_usd for r in usage), Decimal("0")), "0.0001"),
+        }
+        print(json.dumps(payload, indent=2))
+        return EXIT_OK
+    if not usage:
+        print(f"no usage recorded for {month}")
+        return EXIT_OK
+    rows = [
+        [
+            r.name,
+            month,
+            str(r.requests),
+            str(r.cache_hits),
+            str(r.prompt_tokens),
+            str(r.completion_tokens),
+            _money(r.cost_usd, "0.0001"),
+        ]
+        for r in usage
+    ]
+    rows.append(
+        [
+            "TOTAL",
+            "",
+            str(sum(r.requests for r in usage)),
+            str(sum(r.cache_hits for r in usage)),
+            str(sum(r.prompt_tokens for r in usage)),
+            str(sum(r.completion_tokens for r in usage)),
+            _money(sum((r.cost_usd for r in usage), Decimal("0")), "0.0001"),
+        ]
+    )
+    _print_table(
+        ["KEY", "MONTH", "REQUESTS", "CACHE_HITS", "PROMPT_TOK", "COMPL_TOK", "COST_USD"],
+        rows,
+        frozenset({2, 3, 4, 5, 6}),
+    )
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lgw", description="llm-gateway admin CLI")
     parser.add_argument("--db", help="database URL, overrides DATABASE_URL")
@@ -353,6 +432,15 @@ def build_parser() -> argparse.ArgumentParser:
     list_prices.add_argument("--provider", choices=PROVIDERS)
     list_prices.add_argument("--model")
     list_prices.set_defaults(func=cmd_prices_list)
+
+    usage = commands.add_parser("usage", help="monthly usage per key, or --verify spend")
+    usage.add_argument("--month", help="YYYY-MM, defaults to the current UTC month")
+    usage.add_argument("--key", help="only this key")
+    usage.add_argument("--json", action="store_true", help="emit one JSON object")
+    usage.add_argument(
+        "--verify", action="store_true", help="reconcile committed spend with request costs"
+    )
+    usage.set_defaults(func=cmd_usage)
 
     return parser
 
