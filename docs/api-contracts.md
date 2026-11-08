@@ -38,7 +38,7 @@ OpenAI-compatible so existing SDKs raise their native exception types:
 | 404 | `model_not_found` | `invalid_request_error` | No active route for the requested model. |
 | 400 | `unsupported_parameter` | `invalid_request_error` | `tools`, image content, `n > 1`, or unknown fields. |
 | 400 | `invalid_request` | `invalid_request_error` | Malformed JSON or schema violation (message names the field). |
-| 400 | `upstream_rejected` | `invalid_request_error` | The winning provider returned a non-429 4xx; upstream message included. |
+| 400 | `upstream_rejected` | `invalid_request_error` | The winning provider returned a non-429 4xx other than 401/403; upstream message included. A 401/403 (the gateway's provider key was rejected) fails over and, if no route answers, returns 502 `upstream_error` without the provider message. |
 | 413 | `payload_too_large` | `invalid_request_error` | Body exceeds `LGW_MAX_BODY_KB`. |
 | 429 | `budget_exceeded` | `insufficient_quota` | Monthly budget reservation rejected. SDKs treat `insufficient_quota` as non-retryable. |
 | 429 | `upstream_rate_limited` | `rate_limit_error` | Every route returned 429. |

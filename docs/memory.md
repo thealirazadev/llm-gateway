@@ -254,3 +254,9 @@ exists), and `X-LGW-Provider` / `X-LGW-Cache` are absent from error responses al
 - 2026-11-09 - A cache hit reports `X-LGW-Provider: cache`, and cached entries store only the
   answer text, finish reason, and usage, not the provider's full response, because the hit
   response is rebuilt with this request's id and restored placeholders anyway.
+- 2026-11-09 - Deviation from architecture.md's failure table, flagged for the owner: a
+  provider 401/403 now fails over instead of returning `upstream_rejected`. Found by a smoke run
+  against the real OpenAI API with a bad key: the caller got a 400 that blamed them and quoted
+  a masked fragment of the operator's provider key. Credential errors are the operator's
+  problem, safe to fail over (nothing billed), logged as `upstream.credentials_rejected`, and
+  never relayed; exhaustion returns the generic 502.

@@ -80,15 +80,23 @@ def record_attempt(
     )
 
 
+# The provider rejected the gateway's own credentials: an operator problem, not the caller's.
+_CREDENTIAL_STATUSES = frozenset({401, 403})
+
+
 def _can_failover(failure: ProviderFailure) -> bool:
-    """Timeout, connect error, malformed body, 5xx, and 429 are worth another route.
+    """Timeout, connect error, malformed body, 5xx, 429, and credential errors try the next route.
 
     Any other 4xx means the request itself is bad for that provider, so trying the next one
     would only produce the same rejection with extra latency.
     """
     if failure.outcome != OUTCOME_HTTP_ERROR:
         return True
-    return failure.status_code is None or failure.status_code >= 500
+    return (
+        failure.status_code is None
+        or failure.status_code >= 500
+        or failure.status_code in _CREDENTIAL_STATUSES
+    )
 
 
 def _exhaustion_error(failures: Sequence[ProviderFailure]) -> GatewayError:
@@ -128,6 +136,13 @@ async def run_attempts(
                     "status_code": failure.status_code,
                 },
             )
+            if failure.status_code in _CREDENTIAL_STATUSES:
+                # Never relayed: the message can name the operator's key, and it is not the
+                # caller's fault. The caller sees a plain upstream error if no route answers.
+                logger.error(
+                    "upstream.credentials_rejected",
+                    extra={"provider": route.provider, "status_code": failure.status_code},
+                )
             if not _can_failover(failure):
                 raise upstream_rejected(failure.message) from failure
             failures.append(failure)

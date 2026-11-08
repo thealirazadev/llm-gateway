@@ -40,7 +40,11 @@ def connect_timeout(request: httpx.Request) -> None:
     raise httpx.ConnectTimeout("timed out", request=request)
 
 
-@pytest.mark.parametrize("failure", [500, 429, connect_timeout], ids=["5xx", "429", "timeout"])
+@pytest.mark.parametrize(
+    "failure",
+    [500, 429, 401, 403, connect_timeout],
+    ids=["5xx", "429", "bad-provider-key", "forbidden", "timeout"],
+)
 async def test_retryable_failure_fails_over_and_bills_only_the_answering_route(
     client: httpx.AsyncClient, api_key: str, two_routes, upstream, failure
 ) -> None:
@@ -95,3 +99,16 @@ async def test_exhausted_routes_return_one_error(
     assert response.json()["error"]["code"] == expected_code
     with session_scope() as session:
         assert len(list(session.scalars(select(Attempt)))) == 2
+
+
+async def test_a_rejected_provider_key_is_never_relayed_to_the_caller(
+    client: httpx.AsyncClient, api_key: str, two_routes, upstream
+) -> None:
+    leak = "Incorrect API key provided: sk-fake-****test."
+    upstream(lambda request: httpx.Response(401, json={"error": {"message": leak}}))
+
+    response = await client.post("/v1/chat/completions", headers=auth(api_key), json=BODY)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_error"
+    assert "sk-" not in response.text
