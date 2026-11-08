@@ -27,6 +27,7 @@ dev = [
     "pytest-asyncio==1.4.1.post1",
     "ruff==0.8.4",
     "black==26.10.1",
+    "pytest-cov==7.1.0",
 ]
 
 [build-system]
@@ -58,3 +59,7 @@ extend-exclude = "migrations/versions/"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+addopts = "--cov=app --cov-report=term-missing:skip-covered"
+
+[tool.coverage.report]
+fail_under = 90
