@@ -36,6 +36,7 @@ from app.providers.base import (
 from app.schemas import ChatCompletionRequest, prompt_text, validate_supported
 from app.services.budget import reserve, settle_request
 from app.services.cost import compute_cost, estimate_tokens, resolve_price
+from app.services.redaction import Redactor, restore
 from app.services.router import resolve_routes, run_attempts
 from app.services.streaming import stream_completion
 
@@ -66,7 +67,19 @@ async def _parse_request(request: Request) -> ChatCompletionRequest:
     return body
 
 
-def _create_request_row(request_id: str, key: VirtualKey, body: ChatCompletionRequest) -> None:
+def _redact(body: ChatCompletionRequest) -> tuple[ChatCompletionRequest, Redactor]:
+    """Redact every message before anything else sees the prompt; the map stays in memory."""
+    redactor = Redactor()
+    messages = [
+        message.model_copy(update={"content": redactor.redact(message.content)})
+        for message in body.messages
+    ]
+    return body.model_copy(update={"messages": messages}), redactor
+
+
+def _create_request_row(
+    request_id: str, key: VirtualKey, body: ChatCompletionRequest, redactions: int = 0
+) -> None:
     with session_scope() as session:
         session.add(
             RequestRow(
@@ -78,6 +91,7 @@ def _create_request_row(request_id: str, key: VirtualKey, body: ChatCompletionRe
                 status="in_flight",
                 streamed=body.stream,
                 cache_hit=False,
+                redactions=redactions,
                 created_at=utcnow(),
             )
         )
@@ -196,12 +210,12 @@ async def chat_completions(
     request: Request,
     key: Annotated[VirtualKey, Depends(require_key)],
 ) -> Response:
-    body = await _parse_request(request)
+    body, redactor = _redact(await _parse_request(request))
     request_id: str = request.state.request_id
     routes = resolve_routes(body.model)
 
     try:
-        _create_request_row(request_id, key, body)
+        _create_request_row(request_id, key, body, redactor.count)
     except SQLAlchemyError as exc:
         logger.error("audit.create_failed", extra={"reason": str(exc)})
         raise server_error() from exc
@@ -220,7 +234,14 @@ async def chat_completions(
         async def stream_action(provider, route: ModelRoute):
             upstream = await open_stream(provider, body, route.provider_model)
             return stream_completion(
-                provider, upstream, body, route, request_id, cache_state, started
+                provider,
+                upstream,
+                body,
+                route,
+                request_id,
+                cache_state,
+                started,
+                redactor.placeholders,
             )
 
         try:
@@ -267,7 +288,13 @@ async def chat_completions(
             "latency_ms": latency_ms,
         },
     )
+    content = result.response.model_dump()
+    if redactor.placeholders:
+        for choice in content.get("choices", []):
+            message = choice.get("message") or {}
+            if message.get("content"):
+                message["content"] = restore(message["content"], redactor.placeholders)
     return JSONResponse(
-        content=result.response.model_dump(),
+        content=content,
         headers={"X-LGW-Provider": route.provider, "X-LGW-Cache": cache_state},
     )
