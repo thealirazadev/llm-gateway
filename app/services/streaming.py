@@ -8,7 +8,7 @@ of tokens actually generated is recorded whether the stream completes or dies up
 
 import json
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -42,6 +42,7 @@ from app.schemas import (
     prompt_text,
 )
 from app.services.budget import settle_request
+from app.services.cache import CachedAnswer
 from app.services.cost import compute_cost, estimate_tokens, resolve_price
 from app.services.router import record_attempt
 
@@ -113,6 +114,7 @@ class _StreamState:
     completion_tokens: int | None = None
     text: str = ""
     ttfb_ms: int | None = None
+    finish_reason: str | None = None
 
 
 def _resolve_usage(state: _StreamState, body: ChatCompletionRequest) -> tuple[int, int, bool]:
@@ -206,6 +208,7 @@ def stream_completion(
     cache_state: str,
     started: float,
     placeholders: Mapping[str, str] | None = None,
+    on_complete: Callable[[CachedAnswer], None] | None = None,
 ) -> StreamingResponse:
     """Relay an open upstream stream as OpenAI chunks and account for it exactly once."""
     state = _StreamState()
@@ -247,6 +250,7 @@ def stream_completion(
                     if released:
                         yield delta_frame(ChunkDelta(content=released))
                 if event.finish_reason is not None:
+                    state.finish_reason = event.finish_reason
                     tail = buffer.flush()
                     if tail:
                         yield delta_frame(ChunkDelta(content=tail))
@@ -311,6 +315,11 @@ def stream_completion(
         """
         await _close(upstream, request_id)
         _persist(route, request_id, body, state, started)
+        if on_complete is not None and state.status == "ok":
+            prompt_tokens, completion_tokens, _ = _resolve_usage(state, body)
+            on_complete(
+                CachedAnswer(state.text, state.finish_reason, prompt_tokens, completion_tokens)
+            )
 
     return StreamingResponse(
         relay(),

@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,9 +31,23 @@ from app.providers.base import (
     OUTCOME_OK,
     ProviderResult,
     call_provider,
+    get_client,
     open_stream,
 )
-from app.schemas import ChatCompletionRequest, prompt_text, validate_supported
+from app.schemas import (
+    ChatCompletionChunk,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    Choice,
+    ChunkChoice,
+    ChunkDelta,
+    ResponseMessage,
+    Usage,
+    chunk_json,
+    prompt_text,
+    validate_supported,
+)
+from app.services import cache
 from app.services.budget import reserve, settle_request
 from app.services.cost import compute_cost, estimate_tokens, resolve_price
 from app.services.redaction import Redactor, restore
@@ -205,6 +219,117 @@ def _commit_success(
     return cost
 
 
+class _CacheContext:
+    """The cache inputs for one opted-in request: its prompt hash and, once needed, embedding."""
+
+    def __init__(self, key: VirtualKey, body: ChatCompletionRequest) -> None:
+        self.key_id = key.id
+        self.body = body
+        self.digest = cache.prompt_hash(body)
+        self.embedding: list[float] | None = None
+
+    def _lookup(self, placeholders: dict[str, str]) -> cache.CachedAnswer | None:
+        with session_scope() as session:
+            return cache.lookup(
+                session,
+                self.key_id,
+                self.body,
+                self.digest,
+                self.embedding,
+                placeholders,
+                utcnow(),
+            )
+
+    async def find(self, placeholders: dict[str, str]) -> cache.CachedAnswer | None:
+        hit = self._lookup(placeholders)
+        if hit is None:
+            self.embedding = await cache.embed(get_client(), prompt_text(self.body))
+            if self.embedding is not None:
+                hit = self._lookup(placeholders)
+        return hit
+
+    def save(self, answer: cache.CachedAnswer) -> None:
+        try:
+            with session_scope() as session:
+                cache.store(
+                    session, self.key_id, self.body, self.digest, self.embedding, answer, utcnow()
+                )
+        except SQLAlchemyError as exc:
+            logger.warning("cache.store_failed", extra={"reason": str(exc)})
+
+
+def _serve_hit(
+    request_id: str,
+    body: ChatCompletionRequest,
+    hit: cache.CachedAnswer,
+    placeholders: dict[str, str],
+    started: float,
+) -> Response:
+    """Answer from the cache: zero cost, no upstream call, reservation released."""
+    _finalize(
+        request_id,
+        {
+            "status": "ok",
+            "cache_hit": True,
+            "prompt_tokens": hit.prompt_tokens,
+            "completion_tokens": hit.completion_tokens,
+            "cost_usd": Decimal("0"),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        },
+    )
+    content = restore(hit.content, placeholders)
+    usage = Usage(
+        prompt_tokens=hit.prompt_tokens,
+        completion_tokens=hit.completion_tokens,
+        total_tokens=hit.prompt_tokens + hit.completion_tokens,
+    )
+    headers = {"X-LGW-Provider": "cache", "X-LGW-Cache": "hit"}
+    created = int(time.time())
+    if not body.stream:
+        response = ChatCompletionResponse(
+            id=f"chatcmpl-{request_id}",
+            created=created,
+            model=body.model,
+            choices=[
+                Choice(
+                    message=ResponseMessage(role="assistant", content=content),
+                    finish_reason=hit.finish_reason,
+                )
+            ],
+            usage=usage,
+        )
+        return JSONResponse(content=response.model_dump(), headers=headers)
+
+    def frame(delta: ChunkDelta | None, finish: str | None = None, with_usage: bool = False) -> str:
+        chunk = ChatCompletionChunk(
+            id=f"chatcmpl-{request_id}",
+            created=created,
+            model=body.model,
+            choices=[] if delta is None else [ChunkChoice(delta=delta, finish_reason=finish)],
+            usage=usage if with_usage else None,
+        )
+        return f"data: {chunk_json(chunk)}\n\n"
+
+    frames = [
+        frame(ChunkDelta(role="assistant")),
+        frame(ChunkDelta(content=content)),
+        frame(ChunkDelta(), hit.finish_reason or "stop"),
+    ]
+    if body.stream_options and body.stream_options.include_usage:
+        frames.append(frame(None, with_usage=True))
+    frames.append("data: [DONE]\n\n")
+
+    async def replay():
+        for item in frames:
+            yield item.encode()
+
+    return StreamingResponse(
+        replay(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", **headers},
+    )
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
@@ -228,6 +353,15 @@ async def chat_completions(
 
     cache_state = "miss" if key.cache_enabled else "off"
     started = time.perf_counter()
+    cached = _CacheContext(key, body) if key.cache_enabled else None
+    if cached is not None:
+        try:
+            hit = await cached.find(redactor.placeholders)
+        except SQLAlchemyError as exc:
+            logger.warning("cache.lookup_failed", extra={"reason": str(exc)})
+            hit = None
+        if hit is not None:
+            return _serve_hit(request_id, body, hit, redactor.placeholders, started)
 
     if body.stream:
 
@@ -242,6 +376,7 @@ async def chat_completions(
                 cache_state,
                 started,
                 redactor.placeholders,
+                on_complete=cached.save if cached is not None else None,
             )
 
         try:
@@ -277,6 +412,16 @@ async def chat_completions(
     latency_ms = int((time.perf_counter() - started) * 1000)
     _record_attempt(request_id, route, OUTCOME_OK, 200, result.latency_ms)
     cost = _commit_success(request_id, route, result, latency_ms)
+    if cached is not None and result.response.choices:
+        choice = result.response.choices[0]
+        cached.save(
+            cache.CachedAnswer(
+                choice.message.content or "",
+                choice.finish_reason,
+                result.prompt_tokens,
+                result.completion_tokens,
+            )
+        )
     logger.info(
         "request.completed",
         extra={
