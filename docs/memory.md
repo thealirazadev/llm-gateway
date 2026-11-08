@@ -244,3 +244,13 @@ exists), and `X-LGW-Provider` / `X-LGW-Cache` are absent from error responses al
   with `tokens_estimated` so reports stay honest.
 - 2026-11-08 - Security upgrades: fastapi 0.162.2 (starlette 1.10), black 26.10.1, pytest 9.0.3,
   pytest-asyncio 1.4.1, and lockfile bumps for certifi and mako. All 129 tests pass unchanged.
+- 2026-11-09 - Phase 4 built: PII redaction (email, phone with date exclusion, Luhn-checked
+  cards) wired before estimate/cache/upstream and restored in responses and streams; SQLite
+  exact and semantic cache (OpenAI or Gemini embeddings, pure-Python cosine over the newest
+  `LGW_CACHE_SCAN_LIMIT` rows), streamed hit replay, TTL and per-key cap eviction in the
+  sweeper. 153 tests. Redis accelerator deferred: the project rules require approval for the
+  new `redis` dependency (owner decision). Dates such as 2026-11-09 matched the phone pattern
+  in a probe, so date shapes are excluded from phone redaction.
+- 2026-11-09 - A cache hit reports `X-LGW-Provider: cache`, and cached entries store only the
+  answer text, finish reason, and usage, not the provider's full response, because the hit
+  response is rebuilt with this request's id and restored placeholders anyway.

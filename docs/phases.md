@@ -189,22 +189,22 @@ opted-in keys get exact and semantic cache hits with zero PII at rest.
 
 ### Verification checklist
 
-- [ ] A prompt with an email, two phone formats, a Luhn-valid card, and a Luhn-invalid lookalike
+- [x] A prompt with an email, two phone formats, a Luhn-valid card, and a Luhn-invalid lookalike
       reaches the mock upstream with exactly three placeholder types and the lookalike untouched;
       the client response contains the originals; DB, logs, and the embedding request contain
       neither originals nor map.
-- [ ] Streaming restoration: mock upstream splits a placeholder across two chunks; client
+- [x] Streaming restoration: mock upstream splits a placeholder across two chunks; client
       receives the restored value; zero-redaction streams are verified unbuffered (chunk count
       in equals chunk count out).
-- [ ] Identical request on an opted-in key: `X-LGW-Cache: hit`, zero cost, no upstream call, usage
+- [x] Identical request on an opted-in key: `X-LGW-Cache: hit`, zero cost, no upstream call, usage
       reported from the stored entry; non-opted-in key always misses; key B never hits key A's
       entry for the same prompt.
-- [ ] Paraphrase above the threshold hits semantically; below it misses (deterministic fake
+- [x] Paraphrase above the threshold hits semantically; below it misses (deterministic fake
       embedding provider in tests); cached response referencing a placeholder absent from the
       new request's map is discarded as a miss.
-- [ ] Stop Redis mid-run: warning logged once, hits keep working via SQLite; restart Redis:
+- [ ] (Redis accelerator deferred: needs approval to add the `redis` dependency.) Stop Redis mid-run: warning logged once, hits keep working via SQLite; restart Redis:
       accelerator resumes. Eviction: entries past TTL and beyond the per-key cap are pruned.
-- [ ] Lint/format/tests green; no live embedding or provider calls in pytest.
+- [x] Lint/format/tests green; no live embedding or provider calls in pytest.
 
 ---
 

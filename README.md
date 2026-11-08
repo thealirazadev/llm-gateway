@@ -28,10 +28,10 @@ The full target feature set; the status section below says what is implemented t
   disconnect.
 - Cost tracking per request from an append-only, versioned price table: historical reports never
   change when prices do.
-- Planned: PII redaction (emails, phone numbers, credit cards) applied before prompts leave the gateway,
-  reversed on the response via an in-memory placeholder map, streaming included.
-- Planned: opt-in semantic response cache (exact match plus embedding similarity), scoped per key, with
-  optional Redis acceleration and a pure-SQLite default.
+- PII redaction (emails, phone numbers, Luhn-valid card numbers) applied before prompts leave the
+  gateway, reversed on the response via an in-memory placeholder map, streaming included.
+- Opt-in response cache (exact match plus embedding similarity), scoped per key and model, stored
+  in SQLite with redacted content only. A Redis accelerator is planned.
 - Structured audit log of every request (key, provider, model, tokens, cost, latency, cache
   state) with no prompt bodies stored.
 - `lgw` admin CLI: key, route, and price management, plus monthly usage reports (table or JSON)
@@ -125,6 +125,26 @@ curl -N http://127.0.0.1:8000/v1/chat/completions \
 - A client that disconnects mid-stream closes the upstream call immediately; the audit row is
   finalised `cut_off` with the cost observed so far, since the provider billed for it.
 
+## Privacy: PII redaction
+
+Every prompt is redacted before budget estimation, caching, or any upstream call. Emails, phone
+numbers (E.164 and common formats, at least 7 digits, dates excluded), and card numbers that pass
+the Luhn check become `<pii_email_1>`, `<pii_phone_1>`, `<pii_card_1>`; the same value always
+gets the same placeholder. The response, streamed or not, gets the originals back, and a
+placeholder split across two stream chunks is still restored. The map lives in request memory
+only: the database stores a count (`requests.redactions`), never the values. Placeholders the
+model invents are left as they are, never filled with someone else's data.
+
+## Response cache
+
+Create a key with `--cache` to opt in. An identical request (same redacted messages, model, and
+sampling parameters) is answered from SQLite with `X-LGW-Cache: hit`, zero cost, and the stored
+usage; streamed requests get the hit replayed as a stream. Set `LGW_EMBEDDING_PROVIDER`
+(`openai` or `gemini`) and `LGW_EMBEDDING_MODEL` to also match paraphrases above
+`LGW_CACHE_SIMILARITY_THRESHOLD` (default 0.93). Entries never cross keys, expire after
+`LGW_CACHE_TTL_HOURS`, and are capped per key; a background task prunes them. If the embedding
+provider fails, the request simply misses and goes upstream.
+
 ## Test it
 
 ```bash
@@ -159,5 +179,6 @@ the OpenAI, Anthropic, and Gemini adapters, and `GET /v1/models`.
 
 Phase 3 is implemented: route management, startup validation, priority failover, race-safe
 monthly budgets with a scheduled sweeper, and `lgw usage` with `--verify` reconciliation, covered
-by failover, concurrency, and CLI tests. PII redaction and the semantic cache (phase 4) are not built yet. Implementation follows
+by failover, concurrency, and CLI tests. Phase 4 is implemented except the optional Redis accelerator: PII redaction with streaming
+restoration, and the exact and semantic cache with eviction. Implementation follows
 [docs/phases.md](docs/phases.md) one phase at a time.
