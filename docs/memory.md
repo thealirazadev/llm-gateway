@@ -29,7 +29,8 @@ work; log every non-obvious decision with its reason. Keep entries short and dat
   the SQLite dialect insert) and a float-times-Decimal crash in the estimate, and guarded the
   sweep's request update on `in_flight`. 16 new tests cover failover billing, budget rejection,
   commit, release, streaming settlement, a 10-request concurrency race, and the sweeper.
-  Not done: `lgw usage` with `--verify` (commit 7 of phase 3).
+  `lgw usage` (table and JSON) and `lgw usage --verify` followed later the same day, so phase 3
+  is complete. 129 tests pass.
 
 ## Verified on 2026-11-08
 

@@ -34,8 +34,8 @@ The full target feature set; the status section below says what is implemented t
   optional Redis acceleration and a pure-SQLite default.
 - Structured audit log of every request (key, provider, model, tokens, cost, latency, cache
   state) with no prompt bodies stored.
-- `lgw` admin CLI: key, route, and price management. Usage reports with a spend reconciliation
-  check are planned.
+- `lgw` admin CLI: key, route, and price management, plus monthly usage reports (table or JSON)
+  and `lgw usage --verify`, which reconciles each key's committed spend with its request costs.
 
 ## Stack
 
@@ -157,7 +157,7 @@ and migration, virtual-key authentication, key and price management in the CLI, 
 cost calculator, non-streaming and streaming `POST /v1/chat/completions` with exact accounting,
 the OpenAI, Anthropic, and Gemini adapters, and `GET /v1/models`.
 
-Phase 3 is implemented except the `lgw usage` report: route management, startup validation,
-priority failover, and race-safe monthly budgets with a scheduled sweeper, covered by failover and
-concurrency tests. PII redaction and the semantic cache (phase 4) are not built yet. Implementation follows
+Phase 3 is implemented: route management, startup validation, priority failover, race-safe
+monthly budgets with a scheduled sweeper, and `lgw usage` with `--verify` reconciliation, covered
+by failover, concurrency, and CLI tests. PII redaction and the semantic cache (phase 4) are not built yet. Implementation follows
 [docs/phases.md](docs/phases.md) one phase at a time.
