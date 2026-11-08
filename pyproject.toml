@@ -51,6 +51,8 @@ ignore = ["B008"]
 [tool.black]
 line-length = 100
 target-version = ["py312"]
+# Alembic writes migration files; applied migrations are never edited, even for formatting.
+extend-exclude = "migrations/versions/"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
