@@ -57,6 +57,14 @@ uv run python -m app.cli prices add openai gpt-4.1-mini --input 0.40 --output 1.
 uv run uvicorn app.main:app               # serves on http://127.0.0.1:8000
 ```
 
+Or with Docker (SQLite lives on the `/data` volume; the container migrates on start):
+
+```bash
+docker build -t llm-gateway .
+docker run -d --name lgw -p 8000:8000 --env-file .env -v lgw-data:/data llm-gateway
+docker exec lgw lgw keys create --name dev
+```
+
 Then point any OpenAI client at the gateway:
 
 ```bash

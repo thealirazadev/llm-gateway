@@ -90,7 +90,7 @@ async def _sweep_forever() -> None:
 
 def create_app() -> FastAPI:
     configure_logging()
-    app = FastAPI(title="llm-gateway", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="llm-gateway", version="0.2.0", lifespan=lifespan)
     register_exception_handlers(app)
 
     @app.middleware("http")
