@@ -12,9 +12,10 @@ from app.config import PROVIDER_KEY_FIELDS, provider_api_key
 from app.db import session_scope
 from app.errors import REQUEST_ID_HEADER, register_exception_handlers
 from app.logging import configure_logging, get_logger, new_request_id, request_id_var
-from app.models import ModelRoute
+from app.models import ModelRoute, utcnow
 from app.routes import chat, health, models
 from app.services.budget import sweep_stale_reservations
+from app.services.cache import evict
 from app.services.cost import resolve_price
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -73,13 +74,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 async def _sweep_forever() -> None:
-    """Free holds left by requests that never settled, such as after a crash mid-request."""
+    """Free holds left by requests that never settled, and prune expired or excess cache rows."""
     while True:
         await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
         try:
             sweep_stale_reservations()
         except Exception:  # a transient database error must not stop future sweeps
             logger.exception("budget.sweep_failed")
+        try:
+            with session_scope() as session:
+                evict(session, utcnow())
+        except Exception:
+            logger.exception("cache.evict_failed")
 
 
 def create_app() -> FastAPI:
