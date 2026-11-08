@@ -242,3 +242,5 @@ exists), and `X-LGW-Provider` / `X-LGW-Cache` are absent from error responses al
   so local counting would be wrong for two of three providers while adding a dependency; the
   `ceil(chars/4)` fallback is used only when a stream dies before usage arrives and is flagged
   with `tokens_estimated` so reports stay honest.
+- 2026-11-08 - Security upgrades: fastapi 0.162.2 (starlette 1.10), black 26.10.1, pytest 9.0.3,
+  pytest-asyncio 1.4.1, and lockfile bumps for certifi and mako. All 129 tests pass unchanged.
