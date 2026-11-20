@@ -2,7 +2,7 @@
 
 A self-hosted LLM API gateway: one OpenAI-compatible endpoint in front of OpenAI, Anthropic, and
 Gemini, with virtual keys, hard monthly budgets, automatic failover, and a complete cost audit
-trail. PII redaction and a semantic response cache are planned. Point any OpenAI SDK at it by changing
+trail. Point any OpenAI SDK at it by changing
 `base_url` and `api_key`; the gateway handles provider routing, wire-format translation, and the
 accounting.
 
