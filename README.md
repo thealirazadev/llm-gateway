@@ -168,25 +168,20 @@ against its own migrated SQLite file.
 
 | Document | Contents |
 |---|---|
-| [docs/PRD.md](docs/PRD.md) | Problem, target user, features, non-goals, success criteria. |
 | [docs/architecture.md](docs/architecture.md) | Stack rationale, data model, flows, failure modes, invariants, layout. |
-| [docs/rules.md](docs/rules.md) | Project-specific engineering rules. |
-| [docs/phases.md](docs/phases.md) | Implementation phases with exact commit lists and verification checklists. |
+| [docs/decisions.md](docs/decisions.md) | Design decisions and the reasons behind them. |
 | [docs/design.md](docs/design.md) | CLI UX: commands, flags, output, exit codes. |
 | [docs/testing.md](docs/testing.md) | Test strategy, coverage split, commands, CI plan. |
 | [docs/api-contracts.md](docs/api-contracts.md) | Every endpoint and CLI command with examples and the error envelope. |
-| [docs/launch-checklist.md](docs/launch-checklist.md) | Pre-launch verification. |
-| [docs/memory.md](docs/memory.md) | Working log and decisions. |
 
 ## Status
 
-Phases 1 and 2 are implemented: config, structured logging, the error envelope, the full schema
-and migration, virtual-key authentication, key and price management in the CLI, the versioned
-cost calculator, non-streaming and streaming `POST /v1/chat/completions` with exact accounting,
-the OpenAI, Anthropic, and Gemini adapters, and `GET /v1/models`.
+Implemented: config, structured logging, the error envelope, the full schema and migration,
+virtual-key authentication, key and price management in the CLI, the versioned cost calculator,
+non-streaming and streaming `POST /v1/chat/completions` with exact accounting, the OpenAI,
+Anthropic, and Gemini adapters, and `GET /v1/models`.
 
-Phase 3 is implemented: route management, startup validation, priority failover, race-safe
-monthly budgets with a scheduled sweeper, and `lgw usage` with `--verify` reconciliation, covered
-by failover, concurrency, and CLI tests. Phase 4 is implemented except the optional Redis accelerator: PII redaction with streaming
-restoration, and the exact and semantic cache with eviction. Implementation follows
-[docs/phases.md](docs/phases.md) one phase at a time.
+Also implemented: route management, startup validation, priority failover, race-safe monthly
+budgets with a scheduled sweeper, and `lgw usage` with `--verify` reconciliation, covered by
+failover, concurrency, and CLI tests; PII redaction with streaming restoration; and the exact and
+semantic cache with eviction. Not yet implemented: the optional Redis accelerator for the cache.
