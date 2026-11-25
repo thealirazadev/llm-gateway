@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Docs: design decisions and their reasons collected in `docs/decisions.md`; internal planning
+  documents removed.
+
 ## 0.2.0 - 2026-11-09
 
 - PII redaction: emails, phone numbers, and Luhn-valid card numbers become placeholders before a
@@ -12,6 +17,6 @@
 
 ## 0.1.0
 
-Phases 1 to 3: OpenAI-compatible chat completions in front of OpenAI, Anthropic, and Gemini,
+Initial release: OpenAI-compatible chat completions in front of OpenAI, Anthropic, and Gemini,
 streaming with exact accounting, virtual keys, race-safe budgets, priority failover, versioned
 prices, and the `lgw` admin CLI.

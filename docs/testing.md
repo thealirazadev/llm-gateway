@@ -43,11 +43,22 @@
 - CLI: commands run via their entry function against the test DB; table and `--json` output
   snapshots; exit codes 0/1/2; `usage --verify` catches a hand-corrupted `spent_usd`.
 
-## End-to-end (manual, per phase)
+## End-to-end (manual)
 
-The per-phase verification checklists in `docs/phases.md` are the e2e layer: real provider keys,
-the real OpenAI SDK, curl for SSE and disconnects, a real Redis start/stop. These are run at phase
-boundaries, not in CI.
+Checks that need real provider keys or a real client run by hand against a live server, never in
+CI:
+
+- The official OpenAI Python SDK, with only `base_url` and `api_key` changed, completes a chat
+  and a streamed chat on each configured provider; the request row has provider-reported tokens,
+  a non-zero cost, and a `price_id`.
+- `curl -N` on a streamed request shows frames arriving at the upstream's cadence. Killing curl
+  mid-stream closes the upstream promptly and leaves the row `cut_off` with cost committed.
+- The final usage chunk appears only when the client sent `stream_options.include_usage`.
+- With route 1 forced to fail, the request succeeds via route 2 and the audit shows both
+  attempts, exactly one of them `ok`.
+- A revoked key gets 401 on the next request.
+- The server log is JSON lines with request ids; grepping it for `lgw_` and for prompt text
+  returns nothing.
 
 ## Exact commands
 
@@ -69,15 +80,16 @@ uv run python -m app.cli keys create --name dev
 uv run uvicorn app.main:app
 ```
 
-## CI plan
+## CI
 
-GitHub Actions on push and PR to `main`: one job, Python 3.12, `uv sync --frozen`, then
-`ruff check .`, `black --check .`, `pytest`. No secrets in CI; the suite is hermetic by design and
-must stay that way (a test that needs a real key is a defect). CI green is a merge requirement
-from Phase 1 onward.
+GitHub Actions on push and PR to `main`. The check job runs on Python 3.12 and 3.13:
+`uv sync --frozen`, then `ruff check .`, `black --check .`, and `pytest` with a 90 percent
+coverage gate. A second job builds the Docker image, starts it, waits for `GET /health`, and runs
+the CLI inside the container. No secrets in CI; the suite is hermetic by design and must stay
+that way (a test that needs a real key is a defect).
 
-## Definition of done for a feature
+## Definition of done for a change
 
 1. `uv run ruff check .` and `uv run black --check .` clean.
-2. `uv run pytest` green, new tests included in the same commit series.
-3. The feature's items in the current phase's verification checklist pass.
+2. `uv run pytest` green, with new tests in the same change.
+3. Behaviour that only a live provider can show is checked by hand as described above.

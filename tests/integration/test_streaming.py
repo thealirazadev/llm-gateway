@@ -335,7 +335,7 @@ async def test_a_stream_that_times_out_before_the_first_byte_returns_502(
 async def test_a_placeholder_split_across_upstream_chunks_is_restored_in_the_relay(
     api_key: str, seed_route, seed_price, upstream
 ) -> None:
-    """Phase 4 supplies the map; the relay is what has to survive the split."""
+    """Redaction supplies the map; the relay is what has to survive the split."""
     seed_route()
     seed_price()
     upstream(
