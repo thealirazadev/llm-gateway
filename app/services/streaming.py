@@ -41,7 +41,7 @@ from app.schemas import (
     chunk_json,
     prompt_text,
 )
-from app.services.budget import settle_request
+from app.services.budget import finalizable_request, settle_request
 from app.services.cache import CachedAnswer
 from app.services.cost import compute_cost, estimate_tokens, resolve_price
 from app.services.router import record_attempt
@@ -163,7 +163,7 @@ def _persist(
             record_attempt(session, request_id, route, state.outcome, 200, latency_ms)
             session.execute(
                 update(RequestRow)
-                .where(RequestRow.id == request_id, RequestRow.status == "in_flight")
+                .where(RequestRow.id == request_id, finalizable_request())
                 .values(
                     status=state.status,
                     provider=route.provider,

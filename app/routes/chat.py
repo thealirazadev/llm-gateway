@@ -48,7 +48,7 @@ from app.schemas import (
     validate_supported,
 )
 from app.services import cache
-from app.services.budget import reserve, settle_request
+from app.services.budget import finalizable_request, reserve, settle_request
 from app.services.cost import compute_cost, estimate_tokens, resolve_price
 from app.services.redaction import Redactor, restore
 from app.services.router import resolve_routes, run_attempts
@@ -203,7 +203,7 @@ def _commit_success(
             price_id = price.id
         session.execute(
             update(RequestRow)
-            .where(RequestRow.id == request_id, RequestRow.status == "in_flight")
+            .where(RequestRow.id == request_id, finalizable_request())
             .values(
                 status="ok",
                 provider=route.provider,
@@ -213,6 +213,7 @@ def _commit_success(
                 cost_usd=cost,
                 price_id=price_id,
                 latency_ms=latency_ms,
+                error_code=None,
             )
         )
         settle_request(session, request_id, cost)
