@@ -4,6 +4,8 @@
 
 - Docs: design decisions and their reasons collected in `docs/decisions.md`; internal planning
   documents removed.
+- Fix: a request swept for outliving its reservation TTL now still commits its actual cost to the
+  budget and records it on the request row when it completes, as the architecture doc describes.
 
 ## 0.2.0 - 2026-11-09
 

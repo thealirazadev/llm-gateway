@@ -163,6 +163,71 @@ async def test_concurrent_requests_admit_only_what_the_budget_covers(
     assert Decimal(row.reserved_usd) == 0
 
 
+def _expire_and_sweep() -> None:
+    """What the sweeper does to a request that runs past LGW_RESERVATION_TTL_SECONDS."""
+    with session_scope() as session:
+        for reservation in session.scalars(select(Reservation)):
+            reservation.expires_at = utcnow() - timedelta(seconds=1)
+    sweep_stale_reservations()
+
+
+async def test_a_request_swept_mid_flight_still_commits_its_cost(
+    client: httpx.AsyncClient, budget_key, priced_route, upstream
+) -> None:
+    def swept_then_ok(request: httpx.Request) -> httpx.Response:
+        _expire_and_sweep()
+        return httpx.Response(200, json=openai_response(completion_tokens=96))
+
+    upstream(swept_then_ok)
+
+    response = await client.post(
+        "/v1/chat/completions", headers=auth(budget_key("10.00")), json=BODY
+    )
+
+    assert response.status_code == 200
+    row = period()
+    assert Decimal(row.spent_usd) == Decimal("0.096")
+    assert Decimal(row.reserved_usd) == 0
+    assert reservation_states() == ["committed"]
+    with session_scope() as session:
+        request = session.scalar(select(RequestRow))
+    assert (request.status, request.error_code) == ("ok", None)
+    assert Decimal(request.cost_usd) == Decimal("0.096")
+
+
+async def test_a_stream_swept_mid_flight_still_commits_its_cost(
+    client: httpx.AsyncClient, budget_key, priced_route, upstream
+) -> None:
+    stream = sse_upstream(
+        openai_chunk({"role": "assistant", "content": "Hi"}),
+        openai_chunk({}, finish_reason="stop"),
+        openai_usage_chunk(completion_tokens=96),
+        "[DONE]",
+    )
+
+    def swept_then_stream(request: httpx.Request) -> httpx.Response:
+        _expire_and_sweep()
+        return stream(request)
+
+    upstream(swept_then_stream)
+
+    async with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers=auth(budget_key("10.00")),
+        json={**BODY, "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        await response.aread()
+
+    row = period()
+    assert Decimal(row.spent_usd) == Decimal("0.096")
+    assert Decimal(row.reserved_usd) == 0
+    assert reservation_states() == ["committed"]
+    with session_scope() as session:
+        assert session.scalar(select(RequestRow.status)) == "ok"
+
+
 async def test_sweeper_releases_a_hold_that_was_never_settled(budget_key, db) -> None:
     budget_key("5.00")
     with session_scope() as session:

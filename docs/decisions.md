@@ -47,6 +47,13 @@ the request path: SQLAlchemy's generic `insert` has no `on_conflict_do_nothing`,
 upsert needs the SQLite dialect insert, and the estimate multiplied a float by a `Decimal`. A
 test fires 10 concurrent requests at a budget that affords fewer and asserts the cap holds.
 
+A third bug was found in review: a request that outlived `LGW_RESERVATION_TTL_SECONDS` was swept
+while it ran, and its later success then found no `held` reservation and no `in_flight` row, so the
+cost it incurred upstream was never added to `spent_usd` or to the request row. The late commit now
+moves the swept reservation from `released` to `committed` once, adds the actual cost to
+`spent_usd` without touching `reserved_usd` (the sweep already refunded the hold), and writes the
+outcome over the `failed(swept)` row, which keeps `spent_usd == SUM(requests.cost_usd)`.
+
 ## 6. Over budget is 429 `insufficient_quota`
 
 A rejected reservation returns 429 with `error.type: "insufficient_quota"` rather than 402.

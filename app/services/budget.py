@@ -8,7 +8,7 @@ and sweep all guard on state = 'held' so exactly one transition wins.
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import ColumnElement, and_, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,19 @@ from app.models import BudgetPeriod, Reservation, utcnow
 from app.models import Request as RequestRow
 
 logger = get_logger(__name__)
+
+
+def finalizable_request() -> ColumnElement[bool]:
+    """Request rows a completion may still write its outcome and cost to.
+
+    A row is normally finalized from in_flight. A request that outlived its reservation was
+    swept to failed(swept) while it ran; when it then completes, the cost it incurred is still
+    recorded on the row, so spent_usd keeps matching the summed request costs.
+    """
+    return or_(
+        RequestRow.status == "in_flight",
+        and_(RequestRow.status == "failed", RequestRow.error_code == "swept"),
+    )
 
 
 def _period_string(dt: datetime) -> str:
@@ -98,11 +111,12 @@ def commit_reservation(
     reservation_id: int,
     actual_cost_usd: Decimal,
 ) -> bool:
-    """Transition a held reservation to committed and update spent. Return True if successful.
+    """Transition a reservation to committed and add the actual cost to spent.
 
     Only the winner of the conditional UPDATE on state = 'held' succeeds; a race to commit
     against a sweep will result in one winner. If a sweep beats the commit, the commitment
-    still increments spent; the reserved decrement was already done.
+    still increments spent (released -> committed, once); the reserved decrement was already
+    done by the sweep, so it is skipped here.
     """
     rows_affected = session.execute(
         update(Reservation)
@@ -114,7 +128,29 @@ def commit_reservation(
     ).rowcount
 
     if rows_affected == 0:
-        return False
+        swept_then_committed = session.execute(
+            update(Reservation)
+            .where(
+                Reservation.id == reservation_id,
+                Reservation.state == "released",
+            )
+            .values(state="committed")
+        ).rowcount
+        if swept_then_committed == 0:
+            return False
+        reservation = session.get(Reservation, reservation_id)
+        if reservation is None:
+            return False
+        session.execute(
+            update(BudgetPeriod)
+            .where(BudgetPeriod.id == reservation.period_id)
+            .values(spent_usd=BudgetPeriod.spent_usd + actual_cost_usd)
+        )
+        logger.warning(
+            "budget.late_commit",
+            extra={"request_id": reservation.request_id, "cost_usd": str(actual_cost_usd)},
+        )
+        return True
 
     # Get the reservation to find its period and refund amount.
     reservation = session.get(Reservation, reservation_id)
@@ -169,15 +205,16 @@ def release_reservation(
 
 
 def settle_request(session: Session, request_id: str, cost_usd: Decimal) -> None:
-    """Close the request's held reservation, if it has one.
+    """Close the request's reservation, if it has one.
 
-    A request that cost something commits that actual cost; one that cost nothing releases its
-    hold. Requests from keys without a budget have no reservation and are left alone.
+    A request that cost something commits that actual cost, even when the sweeper already
+    released its hold because it ran past the reservation TTL; one that cost nothing releases
+    its hold. Requests from keys without a budget have no reservation and are left alone.
     """
     reservation_id = session.scalar(
         select(Reservation.id).where(
             Reservation.request_id == request_id,
-            Reservation.state == "held",
+            Reservation.state.in_(("held", "released")),
         )
     )
     if reservation_id is None:
