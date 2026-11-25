@@ -67,3 +67,14 @@ def test_restore_ignores_placeholders_the_model_invented():
     restored = restore("Hi <pii_email_1>, not <pii_email_2> or <pii_card_1>", redactor.placeholders)
 
     assert restored == "Hi me@example.com, not <pii_email_2> or <pii_card_1>"
+
+
+def test_mixed_card_grouping_is_one_placeholder_and_restores_verbatim():
+    redactor = Redactor()
+    text = "Pay with 4111-1111 1111-1111 today"
+
+    redacted = redactor.redact(text)
+
+    assert redacted == "Pay with <pii_card_1> today"
+    assert redactor.placeholders == {"<pii_card_1>": "4111-1111 1111-1111"}
+    assert restore(redacted, redactor.placeholders) == text
